@@ -64,7 +64,7 @@ func Marshal(info TypeInfo, value interface{}) ([]byte, error) {
 	}
 
 	switch info.Type() {
-	case TypeVarchar, TypeAscii, TypeBlob, TypeText:
+	case TypeVarchar, TypeAscii, TypeBlob, TypeText, TypeJsonb:
 		return marshalVarchar(info, value)
 	case TypeBoolean:
 		return marshalBool(info, value)
@@ -128,7 +128,7 @@ func Unmarshal(info TypeInfo, data []byte, value interface{}) error {
 	}
 
 	switch info.Type() {
-	case TypeVarchar, TypeAscii, TypeBlob, TypeText:
+	case TypeVarchar, TypeAscii, TypeBlob, TypeText, TypeJsonb:
 		return unmarshalVarchar(info, data, value)
 	case TypeBoolean:
 		return unmarshalBool(info, data, value)
@@ -2369,6 +2369,7 @@ const (
 	TypeSet       Type = 0x0022
 	TypeUDT       Type = 0x0030
 	TypeTuple     Type = 0x0031
+	TypeJsonb     Type = 0x0080 // Yugabyte specific
 )
 
 // String returns the name of the identifier.
@@ -2426,6 +2427,8 @@ func (t Type) String() string {
 		return "varint"
 	case TypeTuple:
 		return "tuple"
+	case TypeJsonb:
+		return "jsonb"
 	default:
 		return fmt.Sprintf("unknown_type_%d", t)
 	}
