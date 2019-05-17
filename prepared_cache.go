@@ -2,7 +2,7 @@ package gocql
 
 import (
 	"bytes"
-	"github.com/gocql/gocql/internal/lru"
+	"github.com/yugabyte/gocql/internal/lru"
 	"sync"
 )
 
