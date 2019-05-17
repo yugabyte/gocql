@@ -27,7 +27,7 @@ In general, the gocql team will focus on supporting the current and previous ver
 Installation
 ------------
 
-    go get github.com/gocql/gocql
+    go get github.com/yugabyte/gocql
 
 
 Features
@@ -121,7 +121,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/gocql/gocql"
+	"github.com/yugabyte/gocql"
 )
 
 func main() {
