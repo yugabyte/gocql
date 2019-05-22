@@ -1171,6 +1171,7 @@ func (c *Conn) executeQuery(ctx context.Context, qry *Query) *Iter {
 		}
 
 		params.skipMeta = !(c.session.cfg.DisableSkipMetadata || qry.disableSkipMetadata)
+		params.skipMeta = false // Temporary workaround for https://github.com/YugaByte/yugabyte-db/issues/1312
 
 		frame = &writeExecuteFrame{
 			preparedID:    info.id,
