@@ -241,9 +241,9 @@ func (s *Session) init() error {
 		newer, _ := checkSystemSchema(s.control)
 		s.useSystemSchema = newer
 	} else {
-		version := s.ring.rrHost().Version()
-		s.useSystemSchema = version.AtLeast(3, 0, 0)
-		s.hasAggregatesAndFunctions = version.AtLeast(2, 2, 0)
+		// YugaByte YCQL version is 3.9. Do not check host for min version.
+		s.useSystemSchema = true
+		s.hasAggregatesAndFunctions = true
 	}
 
 	if s.pool.Size() == 0 {
