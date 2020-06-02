@@ -313,6 +313,50 @@ func TestPaging(t *testing.T) {
 	}
 }
 
+func TestPagingWithBind(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	if session.cfg.ProtoVersion == 1 {
+		t.Skip("Paging not supported. Please use Cassandra >= 2.0")
+	}
+
+	if err := createTable(session, "CREATE TABLE gocql_test.paging_bind (id int, val int, primary key(id,val))"); err != nil {
+		t.Fatal("create table:", err)
+	}
+	for i := 0; i < 100; i++ {
+		if err := session.Query("INSERT INTO paging_bind (id,val) VALUES (?,?)", 1, i).Exec(); err != nil {
+			t.Fatal("insert:", err)
+		}
+	}
+
+	q := session.Query("SELECT val FROM paging_bind WHERE id = ? AND val < ?", 1, 50).PageSize(10)
+	iter := q.Iter()
+	var id int
+	count := 0
+	for iter.Scan(&id) {
+		count++
+	}
+	if err := iter.Close(); err != nil {
+		t.Fatal("close:", err)
+	}
+	if count != 50 {
+		t.Fatalf("expected %d, got %d", 50, count)
+	}
+
+	iter = q.Bind(1, 20).Iter()
+	count = 0
+	for iter.Scan(&id) {
+		count++
+	}
+	if count != 20 {
+		t.Fatalf("expected %d, got %d", 20, count)
+	}
+	if err := iter.Close(); err != nil {
+		t.Fatal("close:", err)
+	}
+}
+
 func TestCAS(t *testing.T) {
 	cluster := createCluster()
 	cluster.SerialConsistency = LocalSerial
@@ -1434,6 +1478,7 @@ func TestQueryInfo(t *testing.T) {
 func TestPrepare_PreparedCacheEviction(t *testing.T) {
 	const maxPrepared = 4
 
+	clusterHosts := getClusterHosts()
 	host := clusterHosts[0]
 	cluster := createCluster()
 	cluster.MaxPreparedStmts = maxPrepared
@@ -2188,6 +2233,50 @@ func TestViewMetadata(t *testing.T) {
 	}
 }
 
+func TestMaterializedViewMetadata(t *testing.T) {
+	if flagCassVersion.Before(3, 0, 0) {
+		return
+	}
+	session := createSession(t)
+	defer session.Close()
+	createMaterializedViews(t, session)
+
+	materializedViews, err := getMaterializedViewsMetadata(session, "gocql_test")
+	if err != nil {
+		t.Fatalf("failed to query view metadata with err: %v", err)
+	}
+	if materializedViews == nil {
+		t.Fatal("failed to query view metadata, nil returned")
+	}
+	if len(materializedViews) != 1 {
+		t.Fatal("expected one view")
+	}
+	expectedView := MaterializedViewMetadata{
+		Keyspace:                "gocql_test",
+		Name:                    "view_view",
+		baseTableName:           "view_table",
+		BloomFilterFpChance:     0.01,
+		Caching:                 map[string]string{"keys": "ALL", "rows_per_partition": "NONE"},
+		Comment:                 "",
+		Compaction:              map[string]string{"class": "org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy", "max_threshold": "32", "min_threshold": "4"},
+		Compression:             map[string]string{"chunk_length_in_kb": "64", "class": "org.apache.cassandra.io.compress.LZ4Compressor"},
+		CrcCheckChance:          1,
+		DcLocalReadRepairChance: 0.1,
+		DefaultTimeToLive:       0,
+		Extensions:              map[string]string{},
+		GcGraceSeconds:          864000,
+		IncludeAllColumns:       false, MaxIndexInterval: 2048, MemtableFlushPeriodInMs: 0, MinIndexInterval: 128, ReadRepairChance: 0,
+		SpeculativeRetry: "99PERCENTILE",
+	}
+
+	expectedView.BaseTableId = materializedViews[0].BaseTableId
+	expectedView.Id = materializedViews[0].Id
+
+	if !reflect.DeepEqual(materializedViews[0], expectedView) {
+		t.Fatalf("materialized view is %+v, but expected %+v", materializedViews[0], expectedView)
+	}
+}
+
 func TestAggregateMetadata(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -2318,6 +2407,7 @@ func TestKeyspaceMetadata(t *testing.T) {
 	}
 	createAggregate(t, session)
 	createViews(t, session)
+	createMaterializedViews(t, session)
 
 	if err := session.Query("CREATE INDEX index_metadata ON test_metadata ( third_id )").Exec(); err != nil {
 		t.Fatalf("failed to create index with err: %v", err)
@@ -2387,6 +2477,37 @@ func TestKeyspaceMetadata(t *testing.T) {
 	_, found = keyspaceMetadata.Views["basicview"]
 	if !found {
 		t.Fatal("failed to find the view in metadata")
+	}
+	_, found = keyspaceMetadata.UserTypes["basicview"]
+	if !found {
+		t.Fatal("failed to find the types in metadata")
+	}
+	textType := TypeText
+	if flagCassVersion.Before(3, 0, 0) {
+		textType = TypeVarchar
+	}
+	expectedType := UserTypeMetadata{
+		Keyspace:   "gocql_test",
+		Name:       "basicview",
+		FieldNames: []string{"birthday", "nationality", "weight", "height"},
+		FieldTypes: []TypeInfo{
+			NativeType{typ: TypeTimestamp},
+			NativeType{typ: textType},
+			NativeType{typ: textType},
+			NativeType{typ: textType},
+		},
+	}
+	if !reflect.DeepEqual(*keyspaceMetadata.UserTypes["basicview"], expectedType) {
+		t.Fatalf("type is %+v, but expected %+v", keyspaceMetadata.UserTypes["basicview"], expectedType)
+	}
+	if flagCassVersion.Major >= 3 {
+		materializedView, found := keyspaceMetadata.MaterializedViews["view_view"]
+		if !found {
+			t.Fatal("failed to find the materialized view in metadata")
+		}
+		if materializedView.BaseTable.Name != "view_table" {
+			t.Fatalf("expected name: %s, materialized view base table name: %s", "view_table", materializedView.BaseTable.Name)
+		}
 	}
 }
 
@@ -2739,6 +2860,7 @@ func TestDiscoverViaProxy(t *testing.T) {
 	// that is infact a proxy it discovers the rest of the ring behind the proxy
 	// and does not store the proxies address as a host in its connection pool.
 	// See https://github.com/gocql/gocql/issues/481
+	clusterHosts := getClusterHosts()
 	proxy, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		t.Fatalf("unable to create proxy listener: %v", err)

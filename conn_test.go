@@ -36,6 +36,7 @@ func TestApprove(t *testing.T) {
 		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator"): true,
 		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator"):         true,
 		approve("io.aiven.cassandra.auth.AivenAuthenticator"):               true,
+		approve("com.amazon.helenus.auth.HelenusAuthenticator"):             true,
 		approve("com.apache.cassandra.auth.FakeAuthenticator"):              false,
 	}
 	for k, v := range tests {
@@ -47,8 +48,8 @@ func TestApprove(t *testing.T) {
 
 func TestJoinHostPort(t *testing.T) {
 	tests := map[string]string{
-		"127.0.0.1:0":                                 JoinHostPort("127.0.0.1", 0),
-		"127.0.0.1:1":                                 JoinHostPort("127.0.0.1:1", 9142),
+		"127.0.0.1:0": JoinHostPort("127.0.0.1", 0),
+		"127.0.0.1:1": JoinHostPort("127.0.0.1:1", 9142),
 		"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:0": JoinHostPort("2001:0db8:85a3:0000:0000:8a2e:0370:7334", 0),
 		"[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1": JoinHostPort("[2001:0db8:85a3:0000:0000:8a2e:0370:7334]:1", 9142),
 	}
@@ -418,7 +419,7 @@ func TestQueryMultinodeWithMetrics(t *testing.T) {
 
 	for i, ip := range addresses {
 		host := &HostInfo{connectAddress: net.ParseIP(ip)}
-		queryMetric := qry.getHostMetrics(host)
+		queryMetric := qry.metrics.hostMetrics(host)
 		observedMetrics := observer.GetMetrics(host)
 
 		requests := int(atomic.LoadInt64(&nodes[i].nKillReq))
@@ -773,7 +774,7 @@ func TestStream0(t *testing.T) {
 		streams: streams.New(protoVersion4),
 	}
 
-	err := conn.recv()
+	err := conn.recv(context.Background())
 	if err == nil {
 		t.Fatal("expected to get an error on stream 0")
 	} else if !strings.HasPrefix(err.Error(), expErr) {

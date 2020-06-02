@@ -16,6 +16,11 @@ import (
 )
 
 type AliasInt int
+type AliasUint uint
+type AliasUint8 uint8
+type AliasUint16 uint16
+type AliasUint32 uint32
+type AliasUint64 uint64
 
 var marshalTests = []struct {
 	Info           TypeInfo
@@ -724,6 +729,19 @@ var marshalTests = []struct {
 	},
 	{
 		CollectionType{
+			NativeType: NativeType{proto: 3, typ: TypeList},
+			Elem:       NativeType{proto: 3, typ: TypeInt},
+		},
+		[]byte("\x00\x00\x00\x02\x00\x00\x00\x04\x00\x00\x00\x01\x00\x00\x00\x04\x00\x00\x00\x02"),
+		func() *[]int {
+			l := []int{1, 2}
+			return &l
+		}(),
+		nil,
+		nil,
+	},
+	{
+		CollectionType{
 			NativeType: NativeType{proto: 2, typ: TypeList},
 			Elem:       NativeType{proto: 2, typ: TypeInt},
 		},
@@ -804,8 +822,64 @@ var marshalTests = []struct {
 	},
 	{
 		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\x00\xff"),
+		uint8(255),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
 		[]byte("\xff\xff"),
 		uint16(65535),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		uint32(65535),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		uint64(65535),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\x00\xff"),
+		AliasUint8(255),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		AliasUint16(65535),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		AliasUint32(65535),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		AliasUint64(65535),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		AliasUint(65535),
 		nil,
 		nil,
 	},
@@ -873,6 +947,62 @@ var marshalTests = []struct {
 		nil,
 	},
 	{
+		NativeType{proto: 2, typ: TypeTinyInt},
+		[]byte("\xff"),
+		AliasUint8(255),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeTinyInt},
+		[]byte("\xff"),
+		AliasUint64(255),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeTinyInt},
+		[]byte("\xff"),
+		AliasUint32(255),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeTinyInt},
+		[]byte("\xff"),
+		AliasUint16(255),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeTinyInt},
+		[]byte("\xff"),
+		AliasUint(255),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x00\x00\xff"),
+		uint8(math.MaxUint8),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x00\xff\xff"),
+		uint64(math.MaxUint16),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\xff\xff\xff\xff"),
+		uint64(math.MaxUint32),
+		nil,
+		nil,
+	},
+	{
 		NativeType{proto: 2, typ: TypeBigInt},
 		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
 		uint64(math.MaxUint64),
@@ -883,6 +1013,13 @@ var marshalTests = []struct {
 		NativeType{proto: 2, typ: TypeInt},
 		[]byte("\xff\xff\xff\xff"),
 		uint32(math.MaxUint32),
+		nil,
+		nil,
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\xff\xff\xff\xff"),
+		uint64(math.MaxUint32),
 		nil,
 		nil,
 	},
@@ -909,6 +1046,214 @@ var marshalTests = []struct {
 		time.Duration(1000),
 		nil,
 		nil,
+	},
+}
+
+var unmarshalTests = []struct {
+	Info           TypeInfo
+	Data           []byte
+	Value          interface{}
+	UnmarshalError error
+}{
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\x01\x00"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\xff\xff\xff\xff"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\x00\x00\x01\x00"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\xff\xff\xff\xff"),
+		uint16(0),
+		UnmarshalError("unmarshal int: value -1 out of range for uint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\x00\x01\x00\x00"),
+		uint16(0),
+		UnmarshalError("unmarshal int: value 65536 out of range for uint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x00\x01\x00"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x00\x01\x00"),
+		uint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for uint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		uint16(0),
+		UnmarshalError("unmarshal int: value -1 out of range for uint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x01\x00\x00"),
+		uint16(0),
+		UnmarshalError("unmarshal int: value 65536 out of range for uint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		uint32(0),
+		UnmarshalError("unmarshal int: value -1 out of range for uint32"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x01\x00\x00\x00\x00"),
+		uint32(0),
+		UnmarshalError("unmarshal int: value 4294967296 out of range for uint32"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\xff\xff"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeSmallInt},
+		[]byte("\x01\x00"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\xff\xff\xff\xff"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\x00\x00\x01\x00"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\xff\xff\xff\xff"),
+		AliasUint16(0),
+		UnmarshalError("unmarshal int: value -1 out of range for gocql.AliasUint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeInt},
+		[]byte("\x00\x01\x00\x00"),
+		AliasUint16(0),
+		UnmarshalError("unmarshal int: value 65536 out of range for gocql.AliasUint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x00\x01\x00"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value -1 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x00\x01\x00"),
+		AliasUint8(0),
+		UnmarshalError("unmarshal int: value 256 out of range for gocql.AliasUint8"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		AliasUint16(0),
+		UnmarshalError("unmarshal int: value -1 out of range for gocql.AliasUint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x00\x00\x01\x00\x00"),
+		AliasUint16(0),
+		UnmarshalError("unmarshal int: value 65536 out of range for gocql.AliasUint16"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\xff\xff\xff\xff\xff\xff\xff\xff"),
+		AliasUint32(0),
+		UnmarshalError("unmarshal int: value -1 out of range for gocql.AliasUint32"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeBigInt},
+		[]byte("\x00\x00\x00\x01\x00\x00\x00\x00"),
+		AliasUint32(0),
+		UnmarshalError("unmarshal int: value 4294967296 out of range for gocql.AliasUint32"),
+	},
+	{
+		CollectionType{
+			NativeType: NativeType{proto: 3, typ: TypeList},
+			Elem:       NativeType{proto: 3, typ: TypeInt},
+		},
+		[]byte("\x00\x00\x00\x02\x00\x00\x00\x04\x00\x00"), // truncated data
+		func() *[]int {
+			l := []int{1, 2}
+			return &l
+		}(),
+		UnmarshalError("unmarshal list: unexpected eof"),
+	},
+	{
+		CollectionType{
+			NativeType: NativeType{proto: 2, typ: TypeMap},
+			Key:        NativeType{proto: 2, typ: TypeVarchar},
+			Elem:       NativeType{proto: 2, typ: TypeInt},
+		},
+		[]byte("\x00\x01\x00\x03fo"),
+		map[string]int{"foo": 1},
+		UnmarshalError("unmarshal map: unexpected eof"),
+	},
+	{
+		CollectionType{
+			NativeType: NativeType{proto: 2, typ: TypeMap},
+			Key:        NativeType{proto: 2, typ: TypeVarchar},
+			Elem:       NativeType{proto: 2, typ: TypeInt},
+		},
+		[]byte("\x00\x01\x00\x03foo\x00\x04\x00\x00"),
+		map[string]int{"foo": 1},
+		UnmarshalError("unmarshal map: unexpected eof"),
 	},
 }
 
@@ -955,7 +1300,24 @@ func TestMarshal_Decode(t *testing.T) {
 			}
 		} else {
 			if err := Unmarshal(test.Info, test.Data, test.Value); err != test.UnmarshalError {
-				t.Errorf("unmarshalTest[%d] (%v=>%t): %#v returned error %#v, want %#v.", i, test.Info, test.Value, test.Value, err, test.UnmarshalError)
+				t.Errorf("unmarshalTest[%d] (%v=>%T): %#v returned error %#v, want %#v.", i, test.Info, test.Value, test.Value, err, test.UnmarshalError)
+			}
+		}
+	}
+	for i, test := range unmarshalTests {
+		v := reflect.New(reflect.TypeOf(test.Value))
+		if test.UnmarshalError == nil {
+			err := Unmarshal(test.Info, test.Data, v.Interface())
+			if err != nil {
+				t.Errorf("unmarshalTest[%d] (%v=>%T): %v", i, test.Info, test.Value, err)
+				continue
+			}
+			if !reflect.DeepEqual(v.Elem().Interface(), test.Value) {
+				t.Errorf("unmarshalTest[%d] (%v=>%T): expected %#v, got %#v.", i, test.Info, test.Value, test.Value, v.Elem().Interface())
+			}
+		} else {
+			if err := Unmarshal(test.Info, test.Data, v.Interface()); err != test.UnmarshalError {
+				t.Errorf("unmarshalTest[%d] (%v=>%T): %#v returned error %#v, want %#v.", i, test.Info, test.Value, test.Value, err, test.UnmarshalError)
 			}
 		}
 	}
@@ -1554,58 +1916,58 @@ func TestReadCollectionSize(t *testing.T) {
 	}
 
 	tests := []struct {
-		name string
-		info CollectionType
-		data []byte
-		isError bool
+		name         string
+		info         CollectionType
+		data         []byte
+		isError      bool
 		expectedSize int
 	}{
 		{
-			name: "short read 0 proto 2",
-			info: listV2,
-			data: []byte{},
+			name:    "short read 0 proto 2",
+			info:    listV2,
+			data:    []byte{},
 			isError: true,
 		},
 		{
-			name: "short read 1 proto 2",
-			info: listV2,
-			data: []byte{0x01},
+			name:    "short read 1 proto 2",
+			info:    listV2,
+			data:    []byte{0x01},
 			isError: true,
 		},
 		{
-			name: "good read proto 2",
-			info: listV2,
-			data: []byte{0x01, 0x38},
+			name:         "good read proto 2",
+			info:         listV2,
+			data:         []byte{0x01, 0x38},
 			expectedSize: 0x0138,
 		},
 		{
-			name: "short read 0 proto 3",
-			info: listV3,
-			data: []byte{},
+			name:    "short read 0 proto 3",
+			info:    listV3,
+			data:    []byte{},
 			isError: true,
 		},
 		{
-			name: "short read 1 proto 3",
-			info: listV3,
-			data: []byte{0x01},
+			name:    "short read 1 proto 3",
+			info:    listV3,
+			data:    []byte{0x01},
 			isError: true,
 		},
 		{
-			name: "short read 2 proto 3",
-			info: listV3,
-			data: []byte{0x01, 0x38},
+			name:    "short read 2 proto 3",
+			info:    listV3,
+			data:    []byte{0x01, 0x38},
 			isError: true,
 		},
 		{
-			name: "short read 3 proto 3",
-			info: listV3,
-			data: []byte{0x01, 0x38, 0x42},
+			name:    "short read 3 proto 3",
+			info:    listV3,
+			data:    []byte{0x01, 0x38, 0x42},
 			isError: true,
 		},
 		{
-			name: "good read proto 3",
-			info: listV3,
-			data: []byte{0x01, 0x38, 0x42, 0x22},
+			name:         "good read proto 3",
+			info:         listV3,
+			data:         []byte{0x01, 0x38, 0x42, 0x22},
 			expectedSize: 0x01384222,
 		},
 	}

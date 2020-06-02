@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -25,15 +26,16 @@ var (
 	flagTimeout      = flag.Duration("gocql.timeout", 5*time.Second, "sets the connection `timeout` for all operations")
 
 	flagCassVersion cassVersion
-	clusterHosts    []string
 )
 
 func init() {
 	flag.Var(&flagCassVersion, "gocql.cversion", "the cassandra version being tested against")
 
-	flag.Parse()
-	clusterHosts = strings.Split(*flagCluster, ",")
 	log.SetFlags(log.Lshortfile | log.LstdFlags)
+}
+
+func getClusterHosts() []string {
+	return strings.Split(*flagCluster, ",")
 }
 
 func addSslOptions(cluster *ClusterConfig) *ClusterConfig {
@@ -57,7 +59,7 @@ func createTable(s *Session, table string) error {
 		return err
 	}
 
-	if err := s.Query(table).RetryPolicy(nil).Exec(); err != nil {
+	if err := s.Query(table).RetryPolicy(&SimpleRetryPolicy{}).Exec(); err != nil {
 		log.Printf("error creating table table=%q err=%v\n", table, err)
 		return err
 	}
@@ -71,6 +73,7 @@ func createTable(s *Session, table string) error {
 }
 
 func createCluster(opts ...func(*ClusterConfig)) *ClusterConfig {
+	clusterHosts := getClusterHosts()
 	cluster := NewCluster(clusterHosts...)
 	cluster.ProtoVersion = *flagProto
 	cluster.CQLVersion = *flagCQL
@@ -181,6 +184,26 @@ func createViews(t *testing.T, session *Session) {
 	}
 }
 
+func createMaterializedViews(t *testing.T, session *Session) {
+	if flagCassVersion.Before(3, 0, 0) {
+		return
+	}
+	if err := session.Query(`CREATE TABLE IF NOT EXISTS gocql_test.view_table (
+		    userid text,
+		    year int,
+		    month int,
+    		    PRIMARY KEY (userid));`).Exec(); err != nil {
+		t.Fatalf("failed to create materialized view with err: %v", err)
+	}
+	if err := session.Query(`CREATE MATERIALIZED VIEW IF NOT EXISTS gocql_test.view_view AS
+		   SELECT year, month, userid
+		   FROM gocql_test.view_table
+		   WHERE year IS NOT NULL AND month IS NOT NULL AND userid IS NOT NULL
+		   PRIMARY KEY (userid, year);`).Exec(); err != nil {
+		t.Fatalf("failed to create materialized view with err: %v", err)
+	}
+}
+
 func createFunctions(t *testing.T, session *Session) {
 	if err := session.Query(`
 		CREATE OR REPLACE FUNCTION gocql_test.avgState ( state tuple<int,bigint>, val int )
@@ -221,25 +244,36 @@ func staticAddressTranslator(newAddr net.IP, newPort int) AddressTranslator {
 }
 
 func assertTrue(t *testing.T, description string, value bool) {
+	t.Helper()
 	if !value {
-		t.Errorf("expected %s to be true", description)
+		t.Fatalf("expected %s to be true", description)
 	}
 }
 
 func assertEqual(t *testing.T, description string, expected, actual interface{}) {
+	t.Helper()
 	if expected != actual {
-		t.Errorf("expected %s to be (%+v) but was (%+v) instead", description, expected, actual)
+		t.Fatalf("expected %s to be (%+v) but was (%+v) instead", description, expected, actual)
+	}
+}
+
+func assertDeepEqual(t *testing.T, description string, expected, actual interface{}) {
+	t.Helper()
+	if !reflect.DeepEqual(expected, actual) {
+		t.Fatalf("expected %s to be (%+v) but was (%+v) instead", description, expected, actual)
 	}
 }
 
 func assertNil(t *testing.T, description string, actual interface{}) {
+	t.Helper()
 	if actual != nil {
-		t.Errorf("expected %s to be (nil) but was (%+v) instead", description, actual)
+		t.Fatalf("expected %s to be (nil) but was (%+v) instead", description, actual)
 	}
 }
 
 func assertNotNil(t *testing.T, description string, actual interface{}) {
+	t.Helper()
 	if actual == nil {
-		t.Errorf("expected %s not to be (nil)", description)
+		t.Fatalf("expected %s not to be (nil)", description)
 	}
 }
