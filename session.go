@@ -143,6 +143,7 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	s.pool = cfg.PoolConfig.buildPool(s)
 
 	s.policy = cfg.PoolConfig.HostSelectionPolicy
+	s.useSystemSchema = true
 	s.policy.Init(s)
 
 	s.executor = &queryExecutor{
