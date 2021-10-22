@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -32,12 +33,14 @@ const (
 
 func TestApprove(t *testing.T) {
 	tests := map[bool]bool{
-		approve("org.apache.cassandra.auth.PasswordAuthenticator"):          true,
-		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator"): true,
-		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator"):         true,
-		approve("io.aiven.cassandra.auth.AivenAuthenticator"):               true,
-		approve("com.amazon.helenus.auth.HelenusAuthenticator"):             true,
-		approve("com.apache.cassandra.auth.FakeAuthenticator"):              false,
+		approve("org.apache.cassandra.auth.PasswordAuthenticator", []string{}):                                          true,
+		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator", []string{}):                                 true,
+		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator", []string{}):                                         true,
+		approve("io.aiven.cassandra.auth.AivenAuthenticator", []string{}):                                               true,
+		approve("com.amazon.helenus.auth.HelenusAuthenticator", []string{}):                                             true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{}):                                              false,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", nil):                                                     false,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{"com.apache.cassandra.auth.FakeAuthenticator"}): true,
 	}
 	for k, v := range tests {
 		if k != v {
@@ -150,10 +153,6 @@ func newTestSession(proto protoVersion, addresses ...string) (*Session, error) {
 
 func TestDNSLookupConnected(t *testing.T) {
 	log := &testLogger{}
-	Logger = log
-	defer func() {
-		Logger = &defaultLogger{}
-	}()
 
 	// Override the defaul DNS resolver and restore at the end
 	failDNS = true
@@ -163,6 +162,7 @@ func TestDNSLookupConnected(t *testing.T) {
 	defer srv.Stop()
 
 	cluster := NewCluster("cassandra1.invalid", srv.Address, "cassandra2.invalid")
+	cluster.Logger = log
 	cluster.ProtoVersion = int(defaultProto)
 	cluster.disableControlConn = true
 
@@ -180,16 +180,13 @@ func TestDNSLookupConnected(t *testing.T) {
 
 func TestDNSLookupError(t *testing.T) {
 	log := &testLogger{}
-	Logger = log
-	defer func() {
-		Logger = &defaultLogger{}
-	}()
 
 	// Override the defaul DNS resolver and restore at the end
 	failDNS = true
 	defer func() { failDNS = false }()
 
 	cluster := NewCluster("cassandra1.invalid", "cassandra2.invalid")
+	cluster.Logger = log
 	cluster.ProtoVersion = int(defaultProto)
 	cluster.disableControlConn = true
 
@@ -212,10 +209,6 @@ func TestDNSLookupError(t *testing.T) {
 func TestStartupTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	log := &testLogger{}
-	Logger = log
-	defer func() {
-		Logger = &defaultLogger{}
-	}()
 
 	srv := NewTestServer(t, defaultProto, ctx)
 	defer srv.Stop()
@@ -225,6 +218,7 @@ func TestStartupTimeout(t *testing.T) {
 
 	startTime := time.Now()
 	cluster := NewCluster(srv.Address)
+	cluster.Logger = log
 	cluster.ProtoVersion = int(defaultProto)
 	cluster.disableControlConn = true
 	// Set very long query connection timeout
@@ -242,7 +236,7 @@ func TestStartupTimeout(t *testing.T) {
 		t.Fatal("ConnectTimeout is not respected")
 	}
 
-	if !strings.Contains(err.Error(), "no connections were made when creating the session") {
+	if !errors.Is(err, ErrNoConnectionsStarted) {
 		t.Fatalf("Expected to receive no connections error - got '%s'", err)
 	}
 
@@ -322,13 +316,14 @@ func TestCancel(t *testing.T) {
 type testQueryObserver struct {
 	metrics map[string]*hostMetrics
 	verbose bool
+	logger  StdLogger
 }
 
 func (o *testQueryObserver) ObserveQuery(ctx context.Context, q ObservedQuery) {
 	host := q.Host.ConnectAddress().String()
 	o.metrics[host] = q.Metrics
 	if o.verbose {
-		Logger.Printf("Observed query %q. Returned %v rows, took %v on host %q with %v attempts and total latency %v. Error: %q\n",
+		o.logger.Printf("Observed query %q. Returned %v rows, took %v on host %q with %v attempts and total latency %v. Error: %q\n",
 			q.Statement, q.Rows, q.End.Sub(q.Start), host, q.Metrics.Attempts, q.Metrics.TotalLatency, q.Err)
 	}
 }
@@ -382,9 +377,7 @@ func TestQueryRetry(t *testing.T) {
 
 func TestQueryMultinodeWithMetrics(t *testing.T) {
 	log := &testLogger{}
-	Logger = log
 	defer func() {
-		Logger = &defaultLogger{}
 		os.Stdout.WriteString(log.String())
 	}()
 
@@ -411,7 +404,7 @@ func TestQueryMultinodeWithMetrics(t *testing.T) {
 
 	// 1 retry per host
 	rt := &SimpleRetryPolicy{NumRetries: 3}
-	observer := &testQueryObserver{metrics: make(map[string]*hostMetrics), verbose: false}
+	observer := &testQueryObserver{metrics: make(map[string]*hostMetrics), verbose: false, logger: log}
 	qry := db.Query("kill").RetryPolicy(rt).Observer(observer)
 	if err := qry.Exec(); err == nil {
 		t.Fatalf("expected error")
@@ -459,9 +452,7 @@ func (t *testRetryPolicy) GetRetryType(err error) RetryType {
 
 func TestSpeculativeExecution(t *testing.T) {
 	log := &testLogger{}
-	Logger = log
 	defer func() {
-		Logger = &defaultLogger{}
 		os.Stdout.WriteString(log.String())
 	}()
 
@@ -516,90 +507,6 @@ func TestSpeculativeExecution(t *testing.T) {
 	// expecting to see 4 (on successful node) + not more than 2 (as cancelled on another node) == 6
 	if requests1+requests2+requests3 > 6 {
 		t.Errorf("error: expected to see 6 attempts, got %v\n", requests1+requests2+requests3)
-	}
-}
-
-func TestStreams_Protocol1(t *testing.T) {
-	srv := NewTestServer(t, protoVersion1, context.Background())
-	defer srv.Stop()
-
-	// TODO: these are more like session tests and should instead operate
-	// on a single Conn
-	cluster := testCluster(protoVersion1, srv.Address)
-	cluster.NumConns = 1
-	cluster.ProtoVersion = 1
-
-	db, err := cluster.CreateSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	var wg sync.WaitGroup
-	for i := 1; i < 128; i++ {
-		// here were just validating that if we send NumStream request we get
-		// a response for every stream and the lengths for the queries are set
-		// correctly.
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if err := db.Query("void").Exec(); err != nil {
-				t.Error(err)
-			}
-		}()
-	}
-	wg.Wait()
-}
-
-func TestStreams_Protocol3(t *testing.T) {
-	srv := NewTestServer(t, protoVersion3, context.Background())
-	defer srv.Stop()
-
-	// TODO: these are more like session tests and should instead operate
-	// on a single Conn
-	cluster := testCluster(protoVersion3, srv.Address)
-	cluster.NumConns = 1
-	cluster.ProtoVersion = 3
-
-	db, err := cluster.CreateSession()
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-
-	for i := 1; i < 32768; i++ {
-		// the test server processes each conn synchronously
-		// here were just validating that if we send NumStream request we get
-		// a response for every stream and the lengths for the queries are set
-		// correctly.
-		if err = db.Query("void").Exec(); err != nil {
-			t.Fatal(err)
-		}
-	}
-}
-
-func BenchmarkProtocolV3(b *testing.B) {
-	srv := NewTestServer(b, protoVersion3, context.Background())
-	defer srv.Stop()
-
-	// TODO: these are more like session tests and should instead operate
-	// on a single Conn
-	cluster := NewCluster(srv.Address)
-	cluster.NumConns = 1
-	cluster.ProtoVersion = 3
-
-	db, err := cluster.CreateSession()
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer db.Close()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
-		if err = db.Query("void").Exec(); err != nil {
-			b.Fatal(err)
-		}
 	}
 }
 
@@ -772,6 +679,7 @@ func TestStream0(t *testing.T) {
 	conn := &Conn{
 		r:       bufio.NewReader(&buf),
 		streams: streams.New(protoVersion4),
+		logger:  &defaultLogger{},
 	}
 
 	err := conn.recv(context.Background())
@@ -803,6 +711,55 @@ func TestContext_Timeout(t *testing.T) {
 	err = db.Query("timeout").WithContext(ctx).Exec()
 	if err != context.Canceled {
 		t.Fatalf("expected to get context cancel error: %v got %v", context.Canceled, err)
+	}
+}
+
+func TestContext_CanceledBeforeExec(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var reqCount uint64
+
+	srv := newTestServerOpts{
+		addr:     "127.0.0.1:0",
+		protocol: defaultProto,
+		recvHook: func(f *framer) {
+			if f.header.op == opStartup || f.header.op == opOptions {
+				// ignore statup and heartbeat messages
+				return
+			}
+			atomic.AddUint64(&reqCount, 1)
+		},
+	}.newServer(t, ctx)
+
+	defer srv.Stop()
+
+	cluster := testCluster(defaultProto, srv.Address)
+	cluster.Timeout = 5 * time.Second
+	db, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	startupRequestCount := atomic.LoadUint64(&reqCount)
+
+	ctx, cancel = context.WithCancel(ctx)
+	cancel()
+
+	err = db.Query("timeout").WithContext(ctx).Exec()
+	if err != context.Canceled {
+		t.Fatalf("expected to get context cancel error: %v got %v", context.Canceled, err)
+	}
+
+	// Queries are executed by separate goroutine and we don't have a synchronization point that would allow us to
+	// check if a request was sent or not.
+	// Fall back to waiting a little bit.
+	time.Sleep(100 * time.Millisecond)
+
+	queryRequestCount := atomic.LoadUint64(&reqCount) - startupRequestCount
+	if queryRequestCount != 0 {
+		t.Fatalf("expected that no request is sent to server, sent %d requests", queryRequestCount)
 	}
 }
 
@@ -1015,7 +972,20 @@ func TestFrameHeaderObserver(t *testing.T) {
 }
 
 func NewTestServerWithAddress(addr string, t testing.TB, protocol uint8, ctx context.Context) *TestServer {
-	laddr, err := net.ResolveTCPAddr("tcp", addr)
+	return newTestServerOpts{
+		addr:     addr,
+		protocol: protocol,
+	}.newServer(t, ctx)
+}
+
+type newTestServerOpts struct {
+	addr     string
+	protocol uint8
+	recvHook func(*framer)
+}
+
+func (nts newTestServerOpts) newServer(t testing.TB, ctx context.Context) *TestServer {
+	laddr, err := net.ResolveTCPAddr("tcp", nts.addr)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1026,7 +996,7 @@ func NewTestServerWithAddress(addr string, t testing.TB, protocol uint8, ctx con
 	}
 
 	headerSize := 8
-	if protocol > protoVersion2 {
+	if nts.protocol > protoVersion2 {
 		headerSize = 9
 	}
 
@@ -1035,10 +1005,12 @@ func NewTestServerWithAddress(addr string, t testing.TB, protocol uint8, ctx con
 		Address:    listen.Addr().String(),
 		listen:     listen,
 		t:          t,
-		protocol:   protocol,
+		protocol:   nts.protocol,
 		headerSize: headerSize,
 		ctx:        ctx,
 		cancel:     cancel,
+
+		onRecv: nts.recvHook,
 	}
 
 	go srv.closeWatch()
@@ -1095,31 +1067,19 @@ type TestServer struct {
 	Address          string
 	TimeoutOnStartup int32
 	t                testing.TB
-	nreq             uint64
 	listen           net.Listener
 	nKillReq         int64
-	compressor       Compressor
 
 	protocol   byte
 	headerSize int
 	ctx        context.Context
 	cancel     context.CancelFunc
 
-	quit   chan struct{}
 	mu     sync.Mutex
 	closed bool
-}
 
-func (srv *TestServer) session() (*Session, error) {
-	return testCluster(protoVersion(srv.protocol), srv.Address).CreateSession()
-}
-
-func (srv *TestServer) host() *HostInfo {
-	hosts, err := hostInfo(srv.Address, 9042)
-	if err != nil {
-		srv.t.Fatal(err)
-	}
-	return hosts[0]
+	// onRecv is a hook point for tests, called in receive loop.
+	onRecv func(*framer)
 }
 
 func (srv *TestServer) closeWatch() {
@@ -1151,7 +1111,9 @@ func (srv *TestServer) serve() {
 					return
 				}
 
-				atomic.AddUint64(&srv.nreq, 1)
+				if srv.onRecv != nil {
+					srv.onRecv(framer)
+				}
 
 				go srv.process(framer)
 			}

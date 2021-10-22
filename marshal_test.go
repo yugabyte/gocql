@@ -93,7 +93,14 @@ var marshalTests = []struct {
 		[]byte{0xb8, 0xe8, 0x56, 0x2c, 0xc, 0xd0},
 		[]byte{0xb8, 0xe8, 0x56, 0x2c, 0xc, 0xd0},
 		MarshalError("can not marshal []byte 6 bytes long into timeuuid, must be exactly 16 bytes long"),
-		UnmarshalError("Unable to parse UUID: UUIDs must be exactly 16 bytes long"),
+		UnmarshalError("unable to parse UUID: UUIDs must be exactly 16 bytes long"),
+	},
+	{
+		NativeType{proto: 2, typ: TypeTimeUUID},
+		[]byte{0x3d, 0xcd, 0x98, 0x0, 0xf3, 0xd9, 0x11, 0xbf, 0x86, 0xd4, 0xb8, 0xe8, 0x56, 0x2c, 0xc, 0xd0},
+		[16]byte{0x3d, 0xcd, 0x98, 0x0, 0xf3, 0xd9, 0x11, 0xbf, 0x86, 0xd4, 0xb8, 0xe8, 0x56, 0x2c, 0xc, 0xd0},
+		nil,
+		nil,
 	},
 	{
 		NativeType{proto: 2, typ: TypeInt},
@@ -1531,8 +1538,6 @@ func (c *CustomString) UnmarshalCQL(info TypeInfo, data []byte) error {
 
 type MyString string
 
-type MyInt int
-
 var typeLookupTest = []struct {
 	TypeName     string
 	ExpectedType Type
@@ -1708,32 +1713,217 @@ func TestMarshalTuple(t *testing.T) {
 		},
 	}
 
-	expectedData := []byte("\x00\x00\x00\x03foo\x00\x00\x00\x03bar")
-	value := []interface{}{"foo", "bar"}
-
-	data, err := Marshal(info, value)
-	if err != nil {
-		t.Errorf("marshalTest: %v", err)
-		return
+	stringToPtr := func(s string) *string { return &s }
+	checkString := func(t *testing.T, exp string, got string) {
+		if got != exp {
+			t.Errorf("expected string to be %v, got %v", exp, got)
+		}
 	}
 
-	if !bytes.Equal(data, expectedData) {
-		t.Errorf("marshalTest: expected %x (%v), got %x (%v)",
-			expectedData, decBigInt(expectedData), data, decBigInt(data))
-		return
+	type tupleStruct struct {
+		A string
+		B *string
+	}
+	var (
+		s1 *string
+		s2 *string
+	)
+
+	testCases := []struct {
+		name       string
+		expected   []byte
+		value      interface{}
+		checkValue interface{}
+		check      func(*testing.T, interface{})
+	}{
+		{
+			name:       "interface-slice:two-strings",
+			expected:   []byte("\x00\x00\x00\x03foo\x00\x00\x00\x03bar"),
+			value:      []interface{}{"foo", "bar"},
+			checkValue: []interface{}{&s1, &s2},
+			check: func(t *testing.T, v interface{}) {
+				checkString(t, "foo", *s1)
+				checkString(t, "bar", *s2)
+			},
+		},
+		{
+			name:       "interface-slice:one-string-one-nil-string",
+			expected:   []byte("\x00\x00\x00\x03foo\xff\xff\xff\xff"),
+			value:      []interface{}{"foo", nil},
+			checkValue: []interface{}{&s1, &s2},
+			check: func(t *testing.T, v interface{}) {
+				checkString(t, "foo", *s1)
+				if s2 != nil {
+					t.Errorf("expected string to be nil, got %v", *s2)
+				}
+			},
+		},
+		{
+			name:     "struct:two-strings",
+			expected: []byte("\x00\x00\x00\x03foo\x00\x00\x00\x03bar"),
+			value: tupleStruct{
+				A: "foo",
+				B: stringToPtr("bar"),
+			},
+			checkValue: &tupleStruct{},
+			check: func(t *testing.T, v interface{}) {
+				got := v.(*tupleStruct)
+				if got.A != "foo" {
+					t.Errorf("expected A string to be %v, got %v", "foo", got.A)
+				}
+				if got.B == nil {
+					t.Errorf("expected B string to be %v, got nil", "bar")
+				}
+				if *got.B != "bar" {
+					t.Errorf("expected B string to be %v, got %v", "bar", got.B)
+				}
+			},
+		},
+		{
+			name:       "struct:one-string-one-nil-string",
+			expected:   []byte("\x00\x00\x00\x03foo\xff\xff\xff\xff"),
+			value:      tupleStruct{A: "foo", B: nil},
+			checkValue: &tupleStruct{},
+			check: func(t *testing.T, v interface{}) {
+				got := v.(*tupleStruct)
+				if got.A != "foo" {
+					t.Errorf("expected A string to be %v, got %v", "foo", got.A)
+				}
+				if got.B != nil {
+					t.Errorf("expected B string to be nil, got %v", *got.B)
+				}
+			},
+		},
+		{
+			name:     "arrayslice:two-strings",
+			expected: []byte("\x00\x00\x00\x03foo\x00\x00\x00\x03bar"),
+			value: [2]*string{
+				stringToPtr("foo"),
+				stringToPtr("bar"),
+			},
+			checkValue: &[2]*string{},
+			check: func(t *testing.T, v interface{}) {
+				got := v.(*[2]*string)
+				checkString(t, "foo", *(got[0]))
+				checkString(t, "bar", *(got[1]))
+			},
+		},
+		{
+			name:     "arrayslice:one-string-one-nil-string",
+			expected: []byte("\x00\x00\x00\x03foo\xff\xff\xff\xff"),
+			value: [2]*string{
+				stringToPtr("foo"),
+				nil,
+			},
+			checkValue: &[2]*string{},
+			check: func(t *testing.T, v interface{}) {
+				got := v.(*[2]*string)
+				checkString(t, "foo", *(got[0]))
+				if got[1] != nil {
+					t.Errorf("expected string to be nil, got %v", *got[1])
+				}
+			},
+		},
 	}
 
-	var s1, s2 string
-	val := []interface{}{&s1, &s2}
-	err = Unmarshal(info, expectedData, val)
-	if err != nil {
-		t.Errorf("unmarshalTest: %v", err)
-		return
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := Marshal(info, tc.value)
+			if err != nil {
+				t.Errorf("marshalTest: %v", err)
+				return
+			}
+
+			if !bytes.Equal(data, tc.expected) {
+				t.Errorf("marshalTest: expected %x (%v), got %x (%v)",
+					tc.expected, decBigInt(tc.expected), data, decBigInt(data))
+				return
+			}
+
+			err = Unmarshal(info, data, tc.checkValue)
+			if err != nil {
+				t.Errorf("unmarshalTest: %v", err)
+				return
+			}
+
+			tc.check(t, tc.checkValue)
+		})
+	}
+}
+
+func TestUnmarshalTuple(t *testing.T) {
+	info := TupleTypeInfo{
+		NativeType: NativeType{proto: 3, typ: TypeTuple},
+		Elems: []TypeInfo{
+			NativeType{proto: 3, typ: TypeVarchar},
+			NativeType{proto: 3, typ: TypeVarchar},
+		},
 	}
 
-	if s1 != "foo" || s2 != "bar" {
-		t.Errorf("unmarshalTest: expected [foo, bar], got [%s, %s]", s1, s2)
-	}
+	// As per the CQL spec, a tuple is a sequence of "bytes" values.
+	// Here we encode a null value (length -1) and the "foo" string (length 3)
+
+	data := []byte("\xff\xff\xff\xff\x00\x00\x00\x03foo")
+
+	t.Run("struct-ptr", func(t *testing.T) {
+		var tmp struct {
+			A *string
+			B *string
+		}
+
+		err := Unmarshal(info, data, &tmp)
+		if err != nil {
+			t.Errorf("unmarshalTest: %v", err)
+			return
+		}
+
+		if tmp.A != nil || *tmp.B != "foo" {
+			t.Errorf("unmarshalTest: expected [nil, foo], got [%v, %v]", *tmp.A, *tmp.B)
+		}
+	})
+	t.Run("struct-nonptr", func(t *testing.T) {
+		var tmp struct {
+			A string
+			B string
+		}
+
+		err := Unmarshal(info, data, &tmp)
+		if err != nil {
+			t.Errorf("unmarshalTest: %v", err)
+			return
+		}
+
+		if tmp.A != "" || tmp.B != "foo" {
+			t.Errorf("unmarshalTest: expected [nil, foo], got [%v, %v]", tmp.A, tmp.B)
+		}
+	})
+
+	t.Run("array", func(t *testing.T) {
+		var tmp [2]*string
+
+		err := Unmarshal(info, data, &tmp)
+		if err != nil {
+			t.Errorf("unmarshalTest: %v", err)
+			return
+		}
+
+		if tmp[0] != nil || *tmp[1] != "foo" {
+			t.Errorf("unmarshalTest: expected [nil, foo], got [%v, %v]", *tmp[0], *tmp[1])
+		}
+	})
+	t.Run("array-nonptr", func(t *testing.T) {
+		var tmp [2]string
+
+		err := Unmarshal(info, data, &tmp)
+		if err != nil {
+			t.Errorf("unmarshalTest: %v", err)
+			return
+		}
+
+		if tmp[0] != "" || tmp[1] != "foo" {
+			t.Errorf("unmarshalTest: expected [nil, foo], got [%v, %v]", tmp[0], tmp[1])
+		}
+	})
 }
 
 func TestMarshalNil(t *testing.T) {
@@ -1987,5 +2177,19 @@ func TestReadCollectionSize(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkUnmarshalUUID(b *testing.B) {
+	b.ReportAllocs()
+	src := make([]byte, 16)
+	dst := UUID{}
+	var ti TypeInfo = NativeType{}
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := unmarshalUUID(ti, src, &dst); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
