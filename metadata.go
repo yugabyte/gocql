@@ -64,7 +64,6 @@ type FunctionMetadata struct {
 	Name              string
 	ArgumentTypes     []TypeInfo
 	ArgumentNames     []string
-	Body              string
 	CalledOnNullInput bool
 	Language          string
 	ReturnType        TypeInfo
@@ -1059,7 +1058,6 @@ func getFunctionsMetadata(session *Session, keyspaceName string) ([]FunctionMeta
 			function_name,
 			argument_types,
 			argument_names,
-			body,
 			called_on_null_input,
 			language,
 			return_type
@@ -1076,7 +1074,6 @@ func getFunctionsMetadata(session *Session, keyspaceName string) ([]FunctionMeta
 		err := rows.Scan(&function.Name,
 			&argumentTypes,
 			&function.ArgumentNames,
-			&function.Body,
 			&function.CalledOnNullInput,
 			&function.Language,
 			&returnType,
@@ -1116,7 +1113,6 @@ func getAggregatesMetadata(session *Session, keyspaceName string) ([]AggregateMe
 			argument_types,
 			final_func,
 			initcond,
-			return_type,
 			state_func,
 			state_type
 		FROM %s
@@ -1128,20 +1124,17 @@ func getAggregatesMetadata(session *Session, keyspaceName string) ([]AggregateMe
 	for rows.Next() {
 		aggregate := AggregateMetadata{Keyspace: keyspaceName}
 		var argumentTypes []string
-		var returnType string
 		var stateType string
 		err := rows.Scan(&aggregate.Name,
 			&argumentTypes,
 			&aggregate.finalFunc,
 			&aggregate.InitCond,
-			&returnType,
 			&aggregate.stateFunc,
 			&stateType,
 		)
 		if err != nil {
 			return nil, err
 		}
-		aggregate.ReturnType = getTypeInfo(returnType, session.logger)
 		aggregate.StateType = getTypeInfo(stateType, session.logger)
 		aggregate.ArgumentTypes = make([]TypeInfo, len(argumentTypes))
 		for i, argumentType := range argumentTypes {
