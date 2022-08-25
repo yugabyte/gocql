@@ -111,18 +111,25 @@ func hash64(k []byte, s int64) int64 {
 	switch len(k) - pos { // all the case statements fall through
 	case 23:
 		c += getByte(k, pos+22) << 56
+		fallthrough
 	case 22:
 		c += getByte(k, pos+21) << 48
+		fallthrough
 	case 21:
 		c += getByte(k, pos+20) << 40
+		fallthrough
 	case 20:
 		c += getByte(k, pos+19) << 32
+		fallthrough
 	case 19:
 		c += getByte(k, pos+18) << 24
+		fallthrough
 	case 18:
 		c += getByte(k, pos+17) << 16
+		fallthrough
 	case 17:
 		c += getByte(k, pos+16) << 8
+		fallthrough
 		// the first byte of c is reserved for the length
 	case 16:
 		b += getLong(k, pos+8)
@@ -130,33 +137,46 @@ func hash64(k []byte, s int64) int64 {
 		break // special handling
 	case 15:
 		b += getByte(k, pos+14) << 48
+		fallthrough
 	case 14:
 		b += getByte(k, pos+13) << 40
+		fallthrough
 	case 13:
 		b += getByte(k, pos+12) << 32
+		fallthrough
 	case 12:
 		b += getByte(k, pos+11) << 24
+		fallthrough
 	case 11:
 		b += getByte(k, pos+10) << 16
+		fallthrough
 	case 10:
 		b += getByte(k, pos+9) << 8
+		fallthrough
 	case 9:
 		b += getByte(k, pos+8)
+		fallthrough
 	case 8:
 		a += getLong(k, pos)
 		break // special handling
 	case 7:
 		a += getByte(k, pos+6) << 48
+		fallthrough
 	case 6:
 		a += getByte(k, pos+5) << 40
+		fallthrough
 	case 5:
 		a += getByte(k, pos+4) << 32
+		fallthrough
 	case 4:
 		a += getByte(k, pos+3) << 24
+		fallthrough
 	case 3:
 		a += getByte(k, pos+2) << 16
+		fallthrough
 	case 2:
 		a += getByte(k, pos+1) << 8
+		fallthrough
 	case 1:
 		a += getByte(k, pos)
 		// case 0: nothing left to add
