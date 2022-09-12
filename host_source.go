@@ -574,12 +574,59 @@ func (r *ringDescriber) GetHosts() ([]*HostInfo, string, error) {
 		return r.prevHosts, r.prevPartitioner, err
 	}
 
+	err = r.getClusterPartitionInfo()
+	if err != nil {
+		return r.prevHosts, r.prevPartitioner, err
+	}
+
 	var partitioner string
 	if len(hosts) > 0 {
 		partitioner = hosts[0].Partitioner()
 	}
 
 	return hosts, partitioner, nil
+}
+
+func (r *ringDescriber) getHostInfoFromIp(ip net.IP) (*HostInfo, error) {
+
+	var host *HostInfo
+	iter := r.session.control.withConnHost(func(ch *connHost) *Iter {
+		if ch.host.ConnectAddress().Equal(ip) {
+			host = ch.host
+			return nil
+		}
+		return ch.conn.query(context.TODO(), "SELECT * FROM system.peers")
+	})
+	if iter != nil {
+		rows, err := iter.SliceMap()
+		if err != nil {
+			return nil, err
+		}
+
+		for _, row := range rows {
+			h, err := r.session.hostInfoFromMap(row, &HostInfo{port: r.session.cfg.Port})
+			if err != nil {
+				return nil, err
+			}
+
+			if h.ConnectAddress().Equal(ip) {
+				host = h
+				break
+			}
+		}
+
+		if host == nil {
+			return nil, errors.New("host not found in peers table")
+		}
+	}
+
+	if host == nil {
+		return nil, errors.New("unable to fetch host info: invalid control connection")
+	} else if host.invalidConnectAddr() {
+		return nil, fmt.Errorf("host ConnectAddress invalid ip=%v: %v", ip, host)
+	}
+
+	return host, nil
 }
 
 // Given an ip/port return HostInfo for the specified ip/port

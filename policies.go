@@ -13,6 +13,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -606,6 +607,252 @@ func (t *tokenAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 		if fallbackIter == nil {
 			// fallback
 			fallbackIter = t.fallback.Pick(qry)
+		}
+
+		// filter the token aware selected hosts from the fallback hosts
+		for fallbackHost := fallbackIter(); fallbackHost != nil; fallbackHost = fallbackIter() {
+			if !used[fallbackHost.Info()] {
+				used[fallbackHost.Info()] = true
+				return fallbackHost
+			}
+		}
+
+		return nil
+	}
+}
+
+func YBPartitionAwareHostPolicy(fallback HostSelectionPolicy, opts ...func(*ybPartitionAwareHostPolicy)) HostSelectionPolicy {
+	p := &ybPartitionAwareHostPolicy{fallback: fallback}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+type ybPartitionAwareHostPolicy struct {
+	fallback            HostSelectionPolicy
+	getKeyspaceMetadata func(keyspace string) (*KeyspaceMetadata, error)
+	getKeyspaceName     func() string
+
+	nonLocalReplicasFallback bool
+
+	// mu protects writes to hosts, partitioner, metadata.
+	// reads can be unlocked as long as they are not used for updating state later.
+	mu          sync.Mutex
+	hosts       cowHostList
+	partitioner string
+	metadata    atomic.Value // *clusterMeta
+
+	session *Session
+	logger  StdLogger
+}
+
+func (p *ybPartitionAwareHostPolicy) KeyspaceChanged(update KeyspaceUpdateEvent) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	meta := p.getMetadataForUpdate()
+	p.updateReplicas(meta, update.Keyspace)
+	p.metadata.Store(meta)
+}
+
+func (p *ybPartitionAwareHostPolicy) Init(s *Session) {
+	p.getKeyspaceMetadata = s.KeyspaceMetadata
+	p.getKeyspaceName = func() string { return s.cfg.Keyspace }
+	p.session = s
+	p.logger = s.logger
+}
+
+func (p *ybPartitionAwareHostPolicy) IsLocal(host *HostInfo) bool {
+	return p.fallback.IsLocal(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) getMetadataReadOnly() *clusterMeta {
+	meta, _ := p.metadata.Load().(*clusterMeta)
+	return meta
+}
+
+// getMetadataForUpdate returns clusterMeta suitable for updating.
+// It is a SHALLOW copy of current metadata in case it was already set or new empty clusterMeta otherwise.
+// This function should be called with t.mu mutex locked and the mutex should not be released before
+// storing the new metadata.
+func (p *ybPartitionAwareHostPolicy) getMetadataForUpdate() *clusterMeta {
+	metaReadOnly := p.getMetadataReadOnly()
+	meta := new(clusterMeta)
+	if metaReadOnly != nil {
+		*meta = *metaReadOnly
+	}
+	return meta
+}
+
+func (p *ybPartitionAwareHostPolicy) updateReplicas(meta *clusterMeta, keyspace string) {
+	newReplicas := make(map[string]tokenRingReplicas, len(meta.replicas))
+
+	ks, err := p.getKeyspaceMetadata(keyspace)
+	if err == nil {
+		strat := getStrategy(ks, p.logger)
+		if strat != nil {
+			if meta != nil && meta.tokenRing != nil {
+				newReplicas[keyspace] = strat.replicaMap(meta.tokenRing)
+			}
+		}
+	}
+
+	for ks, replicas := range meta.replicas {
+		if ks != keyspace {
+			newReplicas[ks] = replicas
+		}
+	}
+
+	meta.replicas = newReplicas
+}
+
+func (p *ybPartitionAwareHostPolicy) AddHost(host *HostInfo) {
+	p.mu.Lock()
+	if p.hosts.add(host) {
+		meta := p.getMetadataForUpdate()
+		meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
+		p.updateReplicas(meta, p.getKeyspaceName())
+		p.metadata.Store(meta)
+	}
+	p.mu.Unlock()
+
+	p.fallback.AddHost(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) HostUp(host *HostInfo) {
+	p.fallback.HostUp(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) HostDown(host *HostInfo) {
+	p.fallback.HostDown(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) RemoveHost(host *HostInfo) {
+	p.mu.Lock()
+	if p.hosts.remove(host.ConnectAddress()) {
+		meta := p.getMetadataForUpdate()
+		meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
+		p.updateReplicas(meta, p.getKeyspaceName())
+		p.metadata.Store(meta)
+	}
+	p.mu.Unlock()
+
+	p.fallback.RemoveHost(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) SetPartitioner(partitioner string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.partitioner != partitioner {
+		p.fallback.SetPartitioner(partitioner)
+		p.partitioner = partitioner
+		meta := p.getMetadataForUpdate()
+		meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
+		p.updateReplicas(meta, p.getKeyspaceName())
+		p.metadata.Store(meta)
+	}
+}
+
+func (p *ybPartitionAwareHostPolicy) AddHosts(hosts []*HostInfo) {
+	p.mu.Lock()
+
+	for _, host := range hosts {
+		p.hosts.add(host)
+	}
+
+	meta := p.getMetadataForUpdate()
+	meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
+	p.updateReplicas(meta, p.getKeyspaceName())
+	p.metadata.Store(meta)
+
+	p.mu.Unlock()
+
+	for _, host := range hosts {
+		p.fallback.AddHost(host)
+	}
+}
+
+var CounterForRefresh int = 0
+
+func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
+	if qry == nil {
+		return p.fallback.Pick(qry)
+	}
+
+	if CounterForRefresh == 1 {
+		p.session.hostSource.getClusterPartitionInfo()
+		CounterForRefresh = 0
+	}
+
+	routingKey, err := qry.GetRoutingKey()
+	if err != nil {
+		return p.fallback.Pick(qry)
+	} else if routingKey == nil {
+		CounterForRefresh = 1
+		return p.fallback.Pick(qry)
+	}
+
+	key := GetKey(routingKey)
+	var replicas []*HostInfo
+
+	res2 := strings.Split(qry.Keyspace(), ".")
+	if res2 == nil {
+		return p.fallback.Pick(qry)
+	}
+	res3 := strings.Split(res2[1], "(")
+	tablesplitmetadeta := getTableSplitMetadata(res2[0], res3[0])
+
+	if tablesplitmetadeta.partitionMap == nil {
+		p.session.hostSource.getClusterPartitionInfo()
+		tablesplitmetadeta1 := getTableSplitMetadata(res2[0], res3[0])
+		if tablesplitmetadeta1.partitionMap == nil {
+			return p.fallback.Pick(qry)
+		} else {
+			tablesplitmetadeta = tablesplitmetadeta1
+		}
+	}
+
+	start := tablesplitmetadeta.Floor(key)
+	replicas = (tablesplitmetadeta.getHosts(start))
+
+	var (
+		fallbackIter NextHost
+		i, j         int
+		remote       []*HostInfo
+	)
+
+	used := make(map[*HostInfo]bool, len(replicas))
+	return func() SelectedHost {
+		for i < len(replicas) {
+			h := replicas[i]
+			i++
+
+			if !p.fallback.IsLocal(h) {
+				remote = append(remote, h)
+				continue
+			}
+			if h.IsUp() {
+				used[h] = true
+				return (*selectedHost)(h)
+			}
+		}
+
+		if p.nonLocalReplicasFallback {
+			for j < len(remote) {
+				h := remote[j]
+				j++
+
+				if h.IsUp() {
+					used[h] = true
+					return (*selectedHost)(h)
+				}
+			}
+		}
+
+		if fallbackIter == nil {
+			// fallback
+			fallbackIter = p.fallback.Pick(qry)
 		}
 
 		// filter the token aware selected hosts from the fallback hosts

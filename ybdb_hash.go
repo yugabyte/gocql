@@ -50,7 +50,6 @@ func unsignedRightShift(n int64, p int64) int64 {
 
 func hash64(k []byte, s int64) int64 {
 	// Set up the internal state
-	fmt.Println("Inside hash64() ...")
 	var ss uint64 = 0xe08c1d668b756f82 // the golden ratio an arbitrary value
 	var a int64 = int64(ss)            // equivalent to -2266404186210603134
 	var b int64 = int64(ss)

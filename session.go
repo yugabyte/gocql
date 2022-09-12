@@ -145,7 +145,7 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	s.hostSource = &ringDescriber{session: s}
 
 	if cfg.PoolConfig.HostSelectionPolicy == nil {
-		cfg.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
+		cfg.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
 	}
 	s.pool = cfg.PoolConfig.buildPool(s)
 
@@ -1073,9 +1073,15 @@ func (q *Query) Keyspace() string {
 	if q.session == nil {
 		return ""
 	}
-	// TODO(chbannis): this should be parsed from the query or we should let
-	// this be set by users.
-	return q.session.cfg.Keyspace
+	res := strings.Fields(q.stmt)
+	var i int
+	for i = 0; i < len(res); i++ {
+		res1 := strings.Contains(res[i], ".")
+		if res1 {
+			break
+		}
+	}
+	return res[i]
 }
 
 // GetRoutingKey gets the routing key to use for routing this query. If

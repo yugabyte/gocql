@@ -112,8 +112,10 @@ func (s *Session) handleSchemaEvent(frames []frame) {
 		case *schemaChangeKeyspace:
 			s.schemaDescriber.clearSchema(f.keyspace)
 			s.handleKeyspaceChange(f.keyspace, f.change)
+			s.hostSource.getClusterPartitionInfo()
 		case *schemaChangeTable:
 			s.schemaDescriber.clearSchema(f.keyspace)
+			s.hostSource.getClusterPartitionInfo()
 		case *schemaChangeAggregate:
 			s.schemaDescriber.clearSchema(f.keyspace)
 		case *schemaChangeFunction:
@@ -137,6 +139,7 @@ func (s *Session) handleNodeEvent(frames []frame) {
 	}
 
 	events := make(map[string]*nodeEvent)
+	s.hostSource.getClusterPartitionInfo()
 
 	for _, frame := range frames {
 		// TODO: can we be sure the order of events in the buffer is correct?
