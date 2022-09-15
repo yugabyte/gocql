@@ -2,8 +2,9 @@ package gocql_test
 
 import (
 	"fmt"
-	"github.com/gocql/gocql"
 	"log"
+
+	"github.com/yugabyte/gocql"
 )
 
 // Example_paging demonstrates how to manually fetch pages and use page state.
@@ -38,7 +39,7 @@ func Example_paging() {
 		scanner := iter.Scanner()
 		for scanner.Next() {
 			var (
-				id int
+				id          int
 				description string
 			)
 			err = scanner.Scan(&id, &description)

@@ -1067,9 +1067,7 @@ func (q *Query) retryPolicy() RetryPolicy {
 
 // Keyspace returns the keyspace the query will be executed against.
 func (q *Query) Keyspace() string {
-	if q.getKeyspace != nil {
-		return q.getKeyspace()
-	}
+
 	if q.session == nil {
 		return ""
 	}
@@ -1081,7 +1079,11 @@ func (q *Query) Keyspace() string {
 			break
 		}
 	}
-	return res[i]
+	if i == len(res) {
+		return ""
+	} else {
+		return res[i]
+	}
 }
 
 // GetRoutingKey gets the routing key to use for routing this query. If
@@ -1107,6 +1109,25 @@ func (q *Query) GetRoutingKey() ([]byte, error) {
 	}
 
 	return createRoutingKey(routingKeyInfo, q.values)
+}
+
+func (q *Query) GetRoutingKeyyb() ([]byte, error) {
+	if q.routingKey != nil {
+		return q.routingKey, nil
+	} else if q.binding != nil && len(q.values) == 0 {
+		// If this query was created using session.Bind we wont have the query
+		// values yet, so we have to pass down to the next policy.
+		// TODO: Remove this and handle this case
+		return nil, nil
+	}
+
+	// try to determine the routing key
+	routingKeyInfo, err := q.session.routingKeyInfo(q.Context(), q.stmt)
+	if err != nil {
+		return nil, err
+	}
+
+	return createRoutingKeyyb(routingKeyInfo, q.values)
 }
 
 func (q *Query) shouldPrepare() bool {
@@ -1689,7 +1710,23 @@ func (b *Batch) Observer(observer BatchObserver) *Batch {
 }
 
 func (b *Batch) Keyspace() string {
-	return b.keyspace
+	if b.session == nil {
+		return ""
+	}
+	res := strings.Fields(b.Entries[0].Stmt)
+	var i int
+	for i = 0; i < len(res); i++ {
+		res1 := strings.Contains(res[i], ".")
+		if res1 {
+			break
+		}
+	}
+
+	if i == len(res) {
+		return ""
+	} else {
+		return res[i]
+	}
 }
 
 // Attempts returns the number of attempts made to execute the batch.
@@ -1883,6 +1920,46 @@ func (b *Batch) GetRoutingKey() ([]byte, error) {
 	return createRoutingKey(routingKeyInfo, entry.Args)
 }
 
+func (b *Batch) GetRoutingKeyyb() ([]byte, error) {
+	if b.routingKey != nil {
+		return b.routingKey, nil
+	}
+
+	if len(b.Entries) == 0 {
+		return nil, nil
+	}
+
+	var result []byte
+	i := 0
+	for i = 0; i < len(b.Entries); i++ {
+		entry := b.Entries[0]
+		if entry.binding != nil {
+			// bindings do not have the values let's skip it like Query does.
+			continue
+		}
+
+		// try to determine the routing key
+		routingKeyInfo, err := b.session.routingKeyInfo(b.Context(), entry.Stmt)
+		if err != nil {
+			continue
+		}
+		if routingKeyInfo == nil {
+			continue
+		}
+		result, err = createRoutingKeyyb(routingKeyInfo, entry.Args)
+		if err != nil {
+			continue
+		} else {
+			break
+		}
+	}
+	if i == len(b.Entries) || result == nil {
+		return nil, nil
+	} else {
+		return result, nil
+	}
+}
+
 func createRoutingKey(routingKeyInfo *routingKeyInfo, values []interface{}) ([]byte, error) {
 	if routingKeyInfo == nil {
 		return nil, nil
@@ -1915,6 +1992,39 @@ func createRoutingKey(routingKeyInfo *routingKeyInfo, values []interface{}) ([]b
 		buf.Write(lenBuf)
 		buf.Write(encoded)
 		buf.WriteByte(0x00)
+	}
+	routingKey := buf.Bytes()
+	return routingKey, nil
+}
+
+func createRoutingKeyyb(routingKeyInfo *routingKeyInfo, values []interface{}) ([]byte, error) {
+	if routingKeyInfo == nil {
+		return nil, nil
+	}
+
+	if len(routingKeyInfo.indexes) == 1 {
+		// single column routing key
+		routingKey, err := Marshalyb(
+			routingKeyInfo.types[0],
+			values[routingKeyInfo.indexes[0]],
+		)
+		if err != nil {
+			return nil, err
+		}
+		return routingKey, nil
+	}
+
+	// composite routing key
+	buf := bytes.NewBuffer(make([]byte, 0, 256))
+	for i := range routingKeyInfo.indexes {
+		encoded, err := Marshalyb(
+			routingKeyInfo.types[i],
+			values[routingKeyInfo.indexes[i]],
+		)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(encoded)
 	}
 	routingKey := buf.Bytes()
 	return routingKey, nil

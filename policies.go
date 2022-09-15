@@ -773,30 +773,26 @@ func (p *ybPartitionAwareHostPolicy) AddHosts(hosts []*HostInfo) {
 	}
 }
 
-var CounterForRefresh int = 0
-
 func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 	if qry == nil {
 		return p.fallback.Pick(qry)
 	}
 
-	if CounterForRefresh == 1 {
-		p.session.hostSource.getClusterPartitionInfo()
-		CounterForRefresh = 0
-	}
-
-	routingKey, err := qry.GetRoutingKey()
+	routingKey, err := qry.GetRoutingKeyyb()
 	if err != nil {
 		return p.fallback.Pick(qry)
 	} else if routingKey == nil {
-		CounterForRefresh = 1
 		return p.fallback.Pick(qry)
 	}
 
 	key := GetKey(routingKey)
 	var replicas []*HostInfo
 
-	res2 := strings.Split(qry.Keyspace(), ".")
+	k_s := qry.Keyspace()
+	if k_s == "" {
+		return p.fallback.Pick(qry)
+	}
+	res2 := strings.Split(k_s, ".")
 	if res2 == nil {
 		return p.fallback.Pick(qry)
 	}

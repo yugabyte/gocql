@@ -161,6 +161,77 @@ func Marshal(info TypeInfo, value interface{}) ([]byte, error) {
 	return nil, fmt.Errorf("can not marshal %T into %s", value, info)
 }
 
+func Marshalyb(info TypeInfo, value interface{}) ([]byte, error) {
+	if info.Version() < protoVersion1 {
+		panic("protocol version not set")
+	}
+
+	if valueRef := reflect.ValueOf(value); valueRef.Kind() == reflect.Ptr {
+		if valueRef.IsNil() {
+			return nil, nil
+		} else if v, ok := value.(Marshaler); ok {
+			return v.MarshalCQL(info)
+		} else {
+			return Marshalyb(info, valueRef.Elem().Interface())
+		}
+	}
+
+	if v, ok := value.(Marshaler); ok {
+		return v.MarshalCQL(info)
+	}
+
+	switch info.Type() {
+	case TypeVarchar, TypeAscii, TypeBlob, TypeText, TypeJsonb:
+		return marshalVarchar(info, value)
+	case TypeBoolean:
+		return marshalBool(info, value)
+	case TypeTinyInt:
+		return marshalTinyInt(info, value)
+	case TypeSmallInt:
+		return marshalSmallInt(info, value)
+	case TypeInt:
+		return marshalInt(info, value)
+	case TypeBigInt, TypeCounter:
+		return marshalBigInt(info, value)
+	case TypeFloat:
+		return marshalFloat(info, value)
+	case TypeDouble:
+		return marshalDouble(info, value)
+	case TypeDecimal:
+		return marshalDecimal(info, value)
+	case TypeTime:
+		return marshalTime(info, value)
+	case TypeTimestamp:
+		return marshalTimestampyb(info, value)
+	case TypeList, TypeSet:
+		return marshalList(info, value)
+	case TypeMap:
+		return marshalMap(info, value)
+	case TypeUUID, TypeTimeUUID:
+		return marshalUUID(info, value)
+	case TypeVarint:
+		return marshalVarint(info, value)
+	case TypeInet:
+		return marshalInet(info, value)
+	case TypeTuple:
+		return marshalTuple(info, value)
+	case TypeUDT:
+		return marshalUDT(info, value)
+	case TypeDate:
+		return marshalDate(info, value)
+	case TypeDuration:
+		return marshalDuration(info, value)
+	}
+
+	// detect protocol 2 UDT
+	if strings.HasPrefix(info.Custom(), "org.apache.cassandra.db.marshal.UserType") && info.Version() < 3 {
+		return nil, ErrorUDTUnavailable
+	}
+
+	// TODO(tux21b): add the remaining types
+	return nil, fmt.Errorf("can not marshal %T into %s", value, info)
+}
+
 // Unmarshal parses the CQL encoded data based on the info parameter that
 // describes the Cassandra internal data type and stores the result in the
 // value pointed by value.
@@ -1255,6 +1326,35 @@ func marshalTimestamp(info TypeInfo, value interface{}) ([]byte, error) {
 		}
 		x := int64(v.UTC().Unix()*1e3) + int64(v.UTC().Nanosecond()/1e6)
 		return encBigInt(x), nil
+	}
+
+	if value == nil {
+		return nil, nil
+	}
+
+	rv := reflect.ValueOf(value)
+	switch rv.Type().Kind() {
+	case reflect.Int64:
+		return encBigInt(rv.Int()), nil
+	}
+	return nil, marshalErrorf("can not marshal %T into %s", value, info)
+}
+
+func marshalTimestampyb(info TypeInfo, value interface{}) ([]byte, error) {
+	switch v := value.(type) {
+	case Marshaler:
+		return v.MarshalCQL(info)
+	case unsetColumn:
+		return nil, nil
+	case int64:
+		return encBigInt(v), nil
+	case time.Time:
+		if v.IsZero() {
+			return []byte{}, nil
+		}
+		x := int64(v.UTC().Unix()*1e3) + int64(v.UTC().Nanosecond()/1e6)
+		// Multiply the timestamp's int64 value by 1000 to adjust the precision.
+		return encBigInt(x * 1000), nil
 	}
 
 	if value == nil {
