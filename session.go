@@ -1661,6 +1661,9 @@ type Batch struct {
 	cancelBatch           func()
 	keyspace              string
 	metrics               *queryMetrics
+
+	//to keep track of which statement in the batch is the first bound statement
+	i int
 }
 
 // NewBatch creates a new batch operation without defaults from the cluster
@@ -1713,7 +1716,10 @@ func (b *Batch) Keyspace() string {
 	if b.session == nil {
 		return ""
 	}
-	res := strings.Fields(b.Entries[0].Stmt)
+	if b.i == -1 {
+		return ""
+	}
+	res := strings.Fields(b.Entries[b.i].Stmt)
 	var i int
 	for i = 0; i < len(res); i++ {
 		res1 := strings.Contains(res[i], ".")
@@ -1932,7 +1938,7 @@ func (b *Batch) GetRoutingKeyyb() ([]byte, error) {
 	var result []byte
 	i := 0
 	for i = 0; i < len(b.Entries); i++ {
-		entry := b.Entries[0]
+		entry := b.Entries[i]
 		if entry.binding != nil {
 			// bindings do not have the values let's skip it like Query does.
 			continue
@@ -1954,8 +1960,10 @@ func (b *Batch) GetRoutingKeyyb() ([]byte, error) {
 		}
 	}
 	if i == len(b.Entries) || result == nil {
+		b.i = -1
 		return nil, nil
 	} else {
+		b.i = i
 		return result, nil
 	}
 }
