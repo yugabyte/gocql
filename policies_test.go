@@ -59,11 +59,12 @@ func localReadandWrite(s string, t *testing.T) (int, int) {
 // because as soon as the test table has been created and the partition metadata
 // has been
 // loaded, the cluster's load-balancer may still be rebalancing the leaders.
-//It may happen that the Test Fail sometimes do to above reason but should pass Majority of the times
+// It may happen that the Test Fail sometimes do to above reason but should pass Majority of the times
 func TestHostRouting(t *testing.T) {
 	//change the ip address according to the cluster
 	cluster := NewCluster("127.0.0.3")
 	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
 
 	session, _ := cluster.CreateSession()
 	defer session.Close()
@@ -87,43 +88,38 @@ func TestHostRouting(t *testing.T) {
 	}
 
 	NUM_KEYS := 100
+
 	//create keyspace
 	var createStmtk = "create keyspace IF NOT EXISTS example"
 	if err := session.Query(createStmtk).Exec(); err != nil {
-
 		t.Fatal(err)
 	}
 
 	//Datatype Text, Composite Partition Key
 	// Create test table.
 	var createStmt1 = "create table IF NOT EXISTS example.testtext2 (h1 text, h2 text, c int, primary key ((h1,h2)));"
-	session.Query(createStmt1).Exec()
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	//Datatype: float and double, Composite Partition Key
 	// Create test table.
 	var createStmt = "create table IF NOT EXISTS example.testfloat2 (h1 float, h2 double, c int, primary key ((h1, h2)));"
-	session.Query(createStmt).Exec()
-
-	time.Sleep(5 * time.Second)
-
-	stmt := session.Query("insert into example.testtext2 (h1, h2, c) values (?, ?, ?)", strconv.Itoa(1), strconv.Itoa(1), 1).Exec()
-	if stmt != nil {
-		t.Fatal(stmt)
+	if err := session.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
 	}
 
-	time.Sleep(15 * time.Second)
-
-	for i := 2; i <= NUM_KEYS; i++ {
-		stmt := session.Query("insert into example.testtext2 (h1, h2, c) values (?, ?, ?)", strconv.Itoa(i), strconv.Itoa(i), i).Exec()
-		if stmt != nil {
-			t.Fatal(stmt)
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query("insert into example.testtext2 (h1, h2, c) values (?, ?, ?)", strconv.Itoa(i), strconv.Itoa(i), i).Exec()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 
 	for i := 1; i <= NUM_KEYS; i++ {
-		stmt := session.Query("update example.testtext2 set c = ? where h2 = ? and h1 = ?", i*2, strconv.Itoa(i), strconv.Itoa(i)).Exec()
-		if stmt != nil {
-			t.Fatal(stmt)
+		err := session.Query("update example.testtext2 set c = ? where h2 = ? and h1 = ?", i*2, strconv.Itoa(i), strconv.Itoa(i)).Exec()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 
@@ -138,23 +134,23 @@ func TestHostRouting(t *testing.T) {
 	}
 
 	for i := 1; i <= NUM_KEYS; i++ {
-		stmt := session.Query(" delete from example.testtext2 where h2 = ? and h1 = ?", strconv.Itoa(i), strconv.Itoa(i)).Exec()
-		if stmt != nil {
-			t.Fatal(stmt)
+		err := session.Query(" delete from example.testtext2 where h2 = ? and h1 = ?", strconv.Itoa(i), strconv.Itoa(i)).Exec()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 
 	for i := 1; i <= NUM_KEYS; i++ {
-		stmt := session.Query("insert into example.testfloat2 (h1, h2, c) values (?, ?, ?)", float32(i), float64(i)+1.070701, i).Exec()
-		if stmt != nil {
-			t.Fatal(stmt)
+		err := session.Query("insert into example.testfloat2 (h1, h2, c) values (?, ?, ?)", float32(i), float64(i)+1.070701, i).Exec()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 
 	for i := 1; i <= NUM_KEYS; i++ {
-		stmt := session.Query("update example.testfloat2 set c = ? where h1 = ? and h2 = ?", i*2, float32(i), float64(i)+1.070701).Exec()
-		if stmt != nil {
-			t.Fatal(stmt)
+		err := session.Query("update example.testfloat2 set c = ? where h1 = ? and h2 = ?", i*2, float32(i), float64(i)+1.070701).Exec()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 
@@ -169,9 +165,9 @@ func TestHostRouting(t *testing.T) {
 	}
 
 	for i := 1; i <= NUM_KEYS; i++ {
-		stmt := session.Query(" delete from example.testfloat2 where h1 = ? and h2 = ?", float32(i), float64(i)+1.070701).Exec()
-		if stmt != nil {
-			t.Fatal(stmt)
+		err := session.Query(" delete from example.testfloat2 where h1 = ? and h2 = ?", float32(i), float64(i)+1.070701).Exec()
+		if err != nil {
+			t.Fatal(err)
 		}
 	}
 
@@ -205,41 +201,55 @@ func check(q *Query, i int64, t *testing.T) {
 
 func createTables(t *testing.T, s *Session) {
 
-	createStmt := "CREATE Keyspace IF NOT EXISTS ybdemo;"
-	s.Query(createStmt).Exec()
-
-	createStmt = "CREATE Keyspace IF NOT EXISTS example;"
-	s.Query(createStmt).Exec()
-
-	createStmt = "CREATE TABLE IF NOT EXISTS ybdemo.employee (id int PRIMARY KEY, name varchar, age int, language varchar);"
-	s.Query(createStmt).Exec()
+	createStmt := "CREATE Keyspace IF NOT EXISTS example;"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_int_2 (h1 int, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_decimal_2 (h1 decimal, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_time_1 (h1 timestamp, h2 text, h3 int, c int, primary key (h1,h2,h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_date_2 (h1 date, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_uuid_2 (h1 uuid, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_inet_2 (h1 inet, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_bool_2 (h1 boolean, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_tinyint_2 (h1 tinyint, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 	createStmt = "create table IF NOT EXISTS example.test_smallint_2 (h1 smallint, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
-	s.Query(createStmt).Exec()
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
 
 }
 
@@ -248,60 +258,58 @@ func TestGetKey(t *testing.T) {
 	//change the ip address according to the cluster
 	cluster := NewCluster("127.0.0.1")
 	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
 
 	session, _ := cluster.CreateSession()
 	defer session.Close()
 
 	createTables(t, session)
-	time.Sleep(10 * time.Second)
 
-	//int single partition key
-	qry1 := session.Query("SELECT name, age, language FROM ybdemo.employee WHERE id = ?", 1)
-	check(qry1, 4624, t)
+	//Hash value of these queries are taken from java-driver and are being matched with the hash that gocql gives for the queries.
 
 	//int composite partition key
-	qry2 := session.Query("select c from example.test_int_2 where h1 = ? and h2= ?", 100, "100")
-	check(qry2, 46090, t)
+	qry1 := session.Query("select c from example.test_int_2 where h1 = ? and h2= ?", 100, "100")
+	check(qry1, 46090, t)
 
 	//decimal composite partition key
-	qry3 := session.Query("select c from example.test_decimal_2 where h1 = ? and h2 = ?", inf.NewDec(int64(90), 0), strconv.Itoa(90))
-	check(qry3, 57745, t)
+	qry2 := session.Query("select c from example.test_decimal_2 where h1 = ? and h2 = ?", inf.NewDec(int64(90), 0), strconv.Itoa(90))
+	check(qry2, 57745, t)
 
 	//timestamp composite partition key
 	t1, err := time.Parse("2006-01-02 15:04:05.000", "2011-02-03 12:12:12.555")
 	if err != nil {
 		t.Fatal(err)
 	}
-	qry4 := session.Query("select c from example.test_time_1 where h1 = ?", t1)
-	check(qry4, 37279, t)
+	qry3 := session.Query("select c from example.test_time_1 where h1 = ?", t1)
+	check(qry3, 37279, t)
 
 	//date composite partition key
 	t2, err := time.Parse("2006-01-02", "2011-02-03")
 	if err != nil {
 		t.Fatal(err)
 	}
-	qry5 := session.Query("select c from example.test_date_2 where h1 = ? and h2 = ?", t2, "o")
-	check(qry5, 32877, t)
+	qry4 := session.Query("select c from example.test_date_2 where h1 = ? and h2 = ?", t2, "o")
+	check(qry4, 32877, t)
 
 	//uuid composite partition key
-	qry6 := session.Query("select c from example.test_uuid_2 where h1 = ? and h2 = ?", "123e4567-e89b-12d3-a456-426614174000", "o")
-	check(qry6, 38835, t)
+	qry5 := session.Query("select c from example.test_uuid_2 where h1 = ? and h2 = ?", "123e4567-e89b-12d3-a456-426614174000", "o")
+	check(qry5, 38835, t)
 
 	//inet composite partition key
-	qry7 := session.Query("select c from example.test_inet_2 where h1 = ? and h2 = ?", "127.0.0.1", "o")
-	check(qry7, 16064, t)
+	qry6 := session.Query("select c from example.test_inet_2 where h1 = ? and h2 = ?", "127.0.0.1", "o")
+	check(qry6, 16064, t)
 
 	//bool composite partition key
-	qry8 := session.Query("select c from example.test_bool_2 where h1 = ? and h2 = ?", false, "o")
-	check(qry8, 57256, t)
+	qry7 := session.Query("select c from example.test_bool_2 where h1 = ? and h2 = ?", false, "o")
+	check(qry7, 57256, t)
 
 	//tinyint composite partition key
-	qry9 := session.Query("select c from example.test_tinyint_2 where h1 = ? and h2 = ?", 1, "o")
-	check(qry9, 48500, t)
+	qry8 := session.Query("select c from example.test_tinyint_2 where h1 = ? and h2 = ?", 1, "o")
+	check(qry8, 48500, t)
 
 	//Smallint composite partition key
-	qry10 := session.Query("select c from example.test_smallint_2 where h1 = ? and h2 = ?", 2, "o")
-	check(qry10, 26643, t)
+	qry9 := session.Query("select c from example.test_smallint_2 where h1 = ? and h2 = ?", 2, "o")
+	check(qry9, 26643, t)
 
 }
 
