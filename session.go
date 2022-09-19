@@ -1068,9 +1068,40 @@ func (q *Query) retryPolicy() RetryPolicy {
 // Keyspace returns the keyspace the query will be executed against.
 func (q *Query) Keyspace() string {
 
+	if q.getKeyspace != nil {
+		return q.getKeyspace()
+	}
 	if q.session == nil {
 		return ""
 	}
+	// TODO(chbannis): this should be parsed from the query or we should let
+	// this be set by users.
+	return q.session.cfg.Keyspace
+}
+
+func (q *Query) KeyspaceAndTableyb() (string, string) {
+
+	if q.session == nil {
+		return "", ""
+	}
+
+	if q.session.cfg.Keyspace != "" {
+		conn := q.session.getConn()
+		if conn == nil {
+			goto Next
+		}
+		info, err := conn.prepareStatement(q.Context(), q.stmt, nil)
+		if err != nil {
+			goto Next
+		}
+		table := info.request.columns[0].Table
+		if table == "" {
+			goto Next
+		}
+		return q.session.cfg.Keyspace, table
+	}
+
+Next:
 	res := strings.Fields(q.stmt)
 	var i int
 	for i = 0; i < len(res); i++ {
@@ -1079,10 +1110,15 @@ func (q *Query) Keyspace() string {
 			break
 		}
 	}
-	if i == len(res) {
-		return ""
+	if i != len(res) {
+		res2 := strings.Split(res[i], ".")
+		if res2 == nil {
+			return "", ""
+		}
+		res3 := strings.Split(res2[1], "(")
+		return res2[0], res3[0]
 	} else {
-		return res[i]
+		return "", ""
 	}
 }
 
@@ -1713,12 +1749,35 @@ func (b *Batch) Observer(observer BatchObserver) *Batch {
 }
 
 func (b *Batch) Keyspace() string {
+	return b.keyspace
+}
+
+func (b *Batch) KeyspaceAndTableyb() (string, string) {
+
 	if b.session == nil {
-		return ""
+		return "", ""
 	}
 	if b.i == -1 {
-		return ""
+		return "", ""
 	}
+
+	if b.session.cfg.Keyspace != "" {
+		conn := b.session.getConn()
+		if conn == nil {
+			goto Next1
+		}
+		info, err := conn.prepareStatement(b.Context(), b.Entries[b.i].Stmt, nil)
+		if err != nil {
+			goto Next1
+		}
+		table := info.request.columns[0].Table
+		if table == "" {
+			goto Next1
+		}
+		return b.session.cfg.Keyspace, table
+	}
+
+Next1:
 	res := strings.Fields(b.Entries[b.i].Stmt)
 	var i int
 	for i = 0; i < len(res); i++ {
@@ -1727,11 +1786,15 @@ func (b *Batch) Keyspace() string {
 			break
 		}
 	}
-
-	if i == len(res) {
-		return ""
+	if i != len(res) {
+		res2 := strings.Split(res[i], ".")
+		if res2 == nil {
+			return "", ""
+		}
+		res3 := strings.Split(res2[1], "(")
+		return res2[0], res3[0]
 	} else {
-		return res[i]
+		return "", ""
 	}
 }
 

@@ -14,6 +14,7 @@ type ExecutableQuery interface {
 	GetRoutingKey() ([]byte, error)
 	GetRoutingKeyyb() ([]byte, error)
 	Keyspace() string
+	KeyspaceAndTableyb() (string, string)
 	IsIdempotent() bool
 
 	withContext(context.Context) ExecutableQuery

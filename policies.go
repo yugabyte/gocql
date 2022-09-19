@@ -13,7 +13,6 @@ import (
 	"math"
 	"math/rand"
 	"net"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -788,20 +787,16 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 	key := GetKey(routingKey)
 	var replicas []*HostInfo
 
-	k_s := qry.Keyspace()
-	if k_s == "" {
+	keyspacename, tablename := qry.KeyspaceAndTableyb()
+	if keyspacename == "" || tablename == "" {
 		return p.fallback.Pick(qry)
 	}
-	res2 := strings.Split(k_s, ".")
-	if res2 == nil {
-		return p.fallback.Pick(qry)
-	}
-	res3 := strings.Split(res2[1], "(")
-	tablesplitmetadeta := getTableSplitMetadata(res2[0], res3[0])
+
+	tablesplitmetadeta := getTableSplitMetadata(keyspacename, tablename)
 
 	if tablesplitmetadeta.partitionMap == nil {
 		p.session.hostSource.getClusterPartitionInfo()
-		tablesplitmetadeta1 := getTableSplitMetadata(res2[0], res3[0])
+		tablesplitmetadeta1 := getTableSplitMetadata(keyspacename, tablename)
 		if tablesplitmetadeta1.partitionMap == nil {
 			return p.fallback.Pick(qry)
 		} else {
