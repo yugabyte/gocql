@@ -62,11 +62,14 @@ func localReadandWrite(s string, t *testing.T) (int, int) {
 // It may happen that the Test Fail sometimes do to above reason but should pass Majority of the times
 func TestHostRouting(t *testing.T) {
 	//change the ip address according to the cluster
-	cluster := NewCluster("127.0.0.3")
+	cluster := NewCluster("127.0.0.1")
 	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
 	cluster.Timeout = 5 * time.Second
 
-	session, _ := cluster.CreateSession()
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer session.Close()
 
 	hosts, _, err := session.hostSource.GetHosts()
@@ -260,7 +263,10 @@ func TestGetKey(t *testing.T) {
 	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
 	cluster.Timeout = 5 * time.Second
 
-	session, _ := cluster.CreateSession()
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer session.Close()
 
 	createTables(t, session)

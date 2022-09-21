@@ -1,10 +1,5 @@
 package gocql
 
-import (
-	"fmt"
-	"strconv"
-)
-
 func getByte(k []byte, pos int) int64 {
 	return int64(k[pos]) & int64(0xff)
 }
@@ -22,30 +17,8 @@ func getLong(k []byte, pos int) int64 {
 
 func unsignedRightShift(n int64, p int64) int64 {
 	// todo assert p <= 64
-
-	// fmt.Printf("Inside unsignedRightShift() n, p: %d, %d\n", n, p)
-	i := p
-	r := n >> p
-	// fmt.Printf("Done n >> p \n")
-	var mask string = "0B"
-	for j := 64; j > 0; j-- {
-		if i > 0 {
-			mask += "0"
-		} else {
-			mask += "1"
-		}
-		i--
-	}
-
-	// fmt.Printf("unsignedRightShift() mask: %s", mask)
-
-	var maskN, err = strconv.ParseInt(mask, 0, 64)
-	if err != nil {
-		fmt.Printf("unsignedRightShift() threw error: %v", err)
-		// return -1, err
-	}
-	r = r & maskN
-	return r
+	r := uint64(n) >> p
+	return int64(r)
 }
 
 func hash64(k []byte, s int64) int64 {
