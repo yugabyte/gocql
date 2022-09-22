@@ -392,6 +392,8 @@ type ringDescriber struct {
 	mu              sync.Mutex
 	prevHosts       []*HostInfo
 	prevPartitioner string
+
+	currHostsyb []*HostInfo
 }
 
 // Returns true if we are using system_schema.keyspaces instead of system.schema_keyspaces
@@ -574,15 +576,14 @@ func (r *ringDescriber) GetHosts() ([]*HostInfo, string, error) {
 		return r.prevHosts, r.prevPartitioner, err
 	}
 
-	err = r.getClusterPartitionInfo()
-	if err != nil {
-		return r.prevHosts, r.prevPartitioner, err
-	}
+	r.currHostsyb = hosts
 
 	var partitioner string
 	if len(hosts) > 0 {
 		partitioner = hosts[0].Partitioner()
 	}
+
+	_ = r.getClusterPartitionInfo()
 
 	return hosts, partitioner, nil
 }
@@ -590,42 +591,17 @@ func (r *ringDescriber) GetHosts() ([]*HostInfo, string, error) {
 func (r *ringDescriber) getHostInfoFromIp(ip net.IP) (*HostInfo, error) {
 
 	var host *HostInfo
-	iter := r.session.control.withConnHost(func(ch *connHost) *Iter {
-		if ch.host.ConnectAddress().Equal(ip) {
-			host = ch.host
-			return nil
-		}
-		return ch.conn.query(context.TODO(), "SELECT * FROM system.peers")
-	})
-	if iter != nil {
-		rows, err := iter.SliceMap()
-		if err != nil {
-			return nil, err
-		}
 
-		for _, row := range rows {
-			h, err := r.session.hostInfoFromMap(row, &HostInfo{port: r.session.cfg.Port})
-			if err != nil {
-				return nil, err
-			}
-
-			if h.ConnectAddress().Equal(ip) {
-				host = h
-				break
-			}
-		}
-
-		if host == nil {
-			return nil, errors.New("host not found in peers table")
+	for _, k := range r.currHostsyb {
+		if k.ConnectAddress().Equal(ip) {
+			host = k
+			break
 		}
 	}
 
 	if host == nil {
-		return nil, errors.New("unable to fetch host info: invalid control connection")
-	} else if host.invalidConnectAddr() {
-		return nil, fmt.Errorf("host ConnectAddress invalid ip=%v: %v", ip, host)
+		return nil, errors.New("host not found in peers table")
 	}
-
 	return host, nil
 }
 

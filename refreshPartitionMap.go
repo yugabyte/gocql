@@ -62,14 +62,7 @@ func (r *TableSplitMetadata) Floor(num int64) int64 {
 	}
 
 	var u int
-	int64AsIntValues := make([]int, len(keys))
-	for i, val := range keys {
-		int64AsIntValues[i] = int(val)
-	}
-	sort.Ints(int64AsIntValues)
-	for i, val := range int64AsIntValues {
-		keys[i] = int64(val)
-	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i] < keys[j] })
 	var i int
 	for i = 0; i < len(keys); i++ {
 		if keys[i] > num {
@@ -102,15 +95,6 @@ func (r *TableSplitMetadata) getHosts(key int64) []*HostInfo {
 func (r *TableSplitMetadata) getPartitionMap() map[int64]PartitionMetadata {
 	return r.partitionMap
 }
-
-var (
-	keyspace_name     string
-	table_name        string
-	start_key         string
-	end_key           string
-	id                UUID
-	replica_addresses map[*net.IP]string
-)
 
 func mapkey(m map[*net.IP]string, value string) (key []*net.IP, ok bool) {
 	for k, v := range m {
@@ -158,6 +142,15 @@ func (r *ringDescriber) getClusterPartitionInfo() error {
 		return errNoControl
 	}
 
+	var (
+		keyspace_name     string
+		table_name        string
+		start_key         string
+		end_key           string
+		id                UUID
+		replica_addresses map[*net.IP]string
+	)
+
 	rows := Iter.Scanner()
 
 	for rows.Next() {
@@ -178,19 +171,25 @@ func (r *ringDescriber) getClusterPartitionInfo() error {
 		ip, _ := mapkey(replica_addresses, "LEADER")
 		for i := 0; i < len(ip); i++ {
 			host, _ := r.getHostInfoFromIp(*ip[i])
-			hosts = append(hosts, host)
+			if host != nil {
+				hosts = append(hosts, host)
+			}
 		}
 
 		ip, _ = mapkey(replica_addresses, "FOLLOWER")
 		for i := 0; i < len(ip); i++ {
 			host, _ := r.getHostInfoFromIp(*ip[i])
-			hosts = append(hosts, host)
+			if host != nil {
+				hosts = append(hosts, host)
+			}
 		}
 
 		ip, _ = mapkey(replica_addresses, "READ_REPLICA")
 		for i := 0; i < len(ip); i++ {
 			host, _ := r.getHostInfoFromIp(*ip[i])
-			hosts = append(hosts, host)
+			if host != nil {
+				hosts = append(hosts, host)
+			}
 		}
 
 		hstart := hex.EncodeToString([]byte(start_key))
