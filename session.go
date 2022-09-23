@@ -1085,21 +1085,27 @@ func (q *Query) KeyspaceAndTableyb() (string, string) {
 		return "", ""
 	}
 
-	if q.session.cfg.Keyspace != "" {
-		conn := q.session.getConn()
-		if conn == nil {
-			goto Next
-		}
-		info, err := conn.prepareStatement(q.Context(), q.stmt, nil)
-		if err != nil {
-			goto Next
-		}
-		table := info.request.columns[0].Table
-		if table == "" {
-			goto Next
-		}
-		return q.session.cfg.Keyspace, table
+	var (
+		table    string = ""
+		keyspace string = ""
+		info     *preparedStatment
+		err      error
+	)
+
+	conn := q.session.getConn()
+	if conn == nil {
+		goto Next
 	}
+	info, err = conn.prepareStatement(q.Context(), q.stmt, nil)
+	if err != nil {
+		goto Next
+	}
+	table = info.request.columns[0].Table
+	keyspace = info.request.columns[0].Keyspace
+	if table == "" || keyspace == "" {
+		goto Next
+	}
+	return keyspace, table
 
 Next:
 	res := strings.Fields(q.stmt)
@@ -1761,21 +1767,27 @@ func (b *Batch) KeyspaceAndTableyb() (string, string) {
 		return "", ""
 	}
 
-	if b.session.cfg.Keyspace != "" {
-		conn := b.session.getConn()
-		if conn == nil {
-			goto Next1
-		}
-		info, err := conn.prepareStatement(b.Context(), b.Entries[b.i].Stmt, nil)
-		if err != nil {
-			goto Next1
-		}
-		table := info.request.columns[0].Table
-		if table == "" {
-			goto Next1
-		}
-		return b.session.cfg.Keyspace, table
+	var (
+		table    string = ""
+		keyspace string = ""
+		info     *preparedStatment
+		err      error
+	)
+
+	conn := b.session.getConn()
+	if conn == nil {
+		goto Next1
 	}
+	info, err = conn.prepareStatement(b.Context(), b.Entries[b.i].Stmt, nil)
+	if err != nil {
+		goto Next1
+	}
+	table = info.request.columns[0].Table
+	keyspace = info.request.columns[0].Keyspace
+	if table == "" || keyspace == "" {
+		goto Next1
+	}
+	return keyspace, table
 
 Next1:
 	res := strings.Fields(b.Entries[b.i].Stmt)
