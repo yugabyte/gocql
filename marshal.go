@@ -161,7 +161,7 @@ func Marshal(info TypeInfo, value interface{}) ([]byte, error) {
 	return nil, fmt.Errorf("can not marshal %T into %s", value, info)
 }
 
-func Marshalyb(info TypeInfo, value interface{}) ([]byte, error) {
+func MarshalYb(info TypeInfo, value interface{}) ([]byte, error) {
 	if info.Version() < protoVersion1 {
 		panic("protocol version not set")
 	}
@@ -172,7 +172,7 @@ func Marshalyb(info TypeInfo, value interface{}) ([]byte, error) {
 		} else if v, ok := value.(Marshaler); ok {
 			return v.MarshalCQL(info)
 		} else {
-			return Marshalyb(info, valueRef.Elem().Interface())
+			return MarshalYb(info, valueRef.Elem().Interface())
 		}
 	}
 
@@ -202,7 +202,7 @@ func Marshalyb(info TypeInfo, value interface{}) ([]byte, error) {
 	case TypeTime:
 		return marshalTime(info, value)
 	case TypeTimestamp:
-		return marshalTimestampyb(info, value)
+		return marshalTimestampYb(info, value)
 	case TypeList, TypeSet:
 		return marshalList(info, value)
 	case TypeMap:
@@ -1340,7 +1340,7 @@ func marshalTimestamp(info TypeInfo, value interface{}) ([]byte, error) {
 	return nil, marshalErrorf("can not marshal %T into %s", value, info)
 }
 
-func marshalTimestampyb(info TypeInfo, value interface{}) ([]byte, error) {
+func marshalTimestampYb(info TypeInfo, value interface{}) ([]byte, error) {
 	switch v := value.(type) {
 	case Marshaler:
 		return v.MarshalCQL(info)

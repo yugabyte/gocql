@@ -32,7 +32,7 @@ func OnPage(link string, t *testing.T) string {
 	return string(content)
 }
 
-func localReadandWrite(s string, t *testing.T) (int, int) {
+func localReadAndWrite(s string, t *testing.T) (int, int) {
 
 	value := strings.Index(s, "handler_latency_yb_client_read_local")
 	line := s[value+70:]
@@ -85,7 +85,7 @@ func TestHostRouting(t *testing.T) {
 	for i := 0; i < len(hosts); i++ {
 		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
 		content := OnPage(s, t)
-		read, write := localReadandWrite(content, t)
+		read, write := localReadAndWrite(content, t)
 		Beforeread += read
 		Beforewrite += write
 	}
@@ -177,7 +177,7 @@ func TestHostRouting(t *testing.T) {
 	for i := 0; i < len(hosts); i++ {
 		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
 		content := OnPage(s, t)
-		read, write := localReadandWrite(content, t)
+		read, write := localReadAndWrite(content, t)
 		Totalread += read
 		Totalwrite += write
 	}
@@ -192,7 +192,7 @@ func TestHostRouting(t *testing.T) {
 }
 
 func check(q *Query, i int64, t *testing.T) {
-	key, err := q.GetRoutingKeyyb()
+	key, err := q.GetRoutingKeyYb()
 	if err != nil || len(key) == 0 {
 		t.Fatal(err)
 	}

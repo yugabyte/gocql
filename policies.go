@@ -777,7 +777,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 		return p.fallback.Pick(qry)
 	}
 
-	routingKey, err := qry.GetRoutingKeyyb()
+	routingKey, err := qry.GetRoutingKeyYb()
 	if err != nil {
 		return p.fallback.Pick(qry)
 	} else if routingKey == nil {
@@ -787,7 +787,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 	key := GetKey(routingKey)
 	var replicas []*HostInfo
 
-	keyspacename, tablename := qry.KeyspaceAndTableyb()
+	keyspacename, tablename := qry.KeyspaceAndTableYb()
 	if keyspacename == "" || tablename == "" {
 		return p.fallback.Pick(qry)
 	}
