@@ -1067,7 +1067,6 @@ func (q *Query) retryPolicy() RetryPolicy {
 
 // Keyspace returns the keyspace the query will be executed against.
 func (q *Query) Keyspace() string {
-
 	if q.getKeyspace != nil {
 		return q.getKeyspace()
 	}

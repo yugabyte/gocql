@@ -2,9 +2,8 @@ package gocql_test
 
 import (
 	"context"
+       "github.com/yugabyte/gocql"
 	"log"
-
-	"github.com/yugabyte/gocql"
 )
 
 // MyUDTMarshaler implements UDTMarshaler.

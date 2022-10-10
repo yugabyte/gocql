@@ -3,14 +3,13 @@ package gocql_test
 import (
 	"context"
 	"fmt"
+       "github.com/yugabyte/gocql"
 	"log"
-
-	"github.com/yugabyte/gocql"
 )
 
 type MyUDT struct {
 	FieldA string `cql:"field_a"`
-	FieldB int32  `cql:"field_b"`
+       FieldB int32 `cql:"field_b"`
 }
 
 // Example_userDefinedTypesStruct demonstrates how to work with user-defined types as structs.
