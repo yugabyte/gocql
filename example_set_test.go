@@ -2,10 +2,9 @@ package gocql_test
 
 import (
 	"fmt"
+	"github.com/yugabyte/gocql"
 	"log"
 	"sort"
-
-	"github.com/yugabyte/gocql"
 )
 
 // Example_set demonstrates how to use sets.
@@ -46,7 +45,7 @@ func Example_set() {
 	scanner := session.Query(`SELECT id, value FROM sets`).Iter().Scanner()
 	for scanner.Next() {
 		var (
-			id  int32
+			id int32
 			val []string
 		)
 		err := scanner.Scan(&id, &val)

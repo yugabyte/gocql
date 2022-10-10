@@ -3,9 +3,8 @@ package gocql_test
 import (
 	"context"
 	"fmt"
-	"log"
-
 	"github.com/yugabyte/gocql"
+	"log"
 )
 
 // Example_userDefinedTypesMap demonstrates how to work with user-defined types as maps.

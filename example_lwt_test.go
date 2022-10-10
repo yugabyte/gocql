@@ -3,9 +3,8 @@ package gocql_test
 import (
 	"context"
 	"fmt"
-	"log"
-
 	"github.com/yugabyte/gocql"
+	"log"
 )
 
 // ExampleQuery_MapScanCAS demonstrates how to execute a single-statement lightweight transaction.
