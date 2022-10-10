@@ -3,10 +3,11 @@ package gocql_test
 import (
 	"context"
 	"fmt"
-       "github.com/yugabyte/gocql"
 	"log"
 	"strconv"
 	"strings"
+
+	"github.com/yugabyte/gocql"
 )
 
 // MyMarshaler implements Marshaler and Unmarshaler.

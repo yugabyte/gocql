@@ -3,11 +3,12 @@ package gocql_test
 import (
 	"context"
 	"fmt"
-       "github.com/yugabyte/gocql"
 	"log"
 	"os"
 	"reflect"
 	"text/tabwriter"
+
+	"github.com/yugabyte/gocql"
 )
 
 // Example_dynamicColumns demonstrates how to handle dynamic column list.
