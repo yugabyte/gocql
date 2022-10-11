@@ -629,92 +629,29 @@ func YBPartitionAwareHostPolicy(fallback HostSelectionPolicy, opts ...func(*ybPa
 }
 
 type ybPartitionAwareHostPolicy struct {
-	fallback            HostSelectionPolicy
-	getKeyspaceMetadata func(keyspace string) (*KeyspaceMetadata, error)
-	getKeyspaceName     func() string
-
+	fallback                 HostSelectionPolicy
 	nonLocalReplicasFallback bool
 
-	// mu protects writes to hosts, partitioner, metadata.
+	// mu protects writes to hosts
 	// reads can be unlocked as long as they are not used for updating state later.
-	mu          sync.Mutex
-	hosts       cowHostList
-	partitioner string
-	metadata    atomic.Value // *clusterMeta
+	mu    sync.Mutex
+	hosts cowHostList
 
 	session *Session
-	logger  StdLogger
 }
 
 func (p *ybPartitionAwareHostPolicy) KeyspaceChanged(update KeyspaceUpdateEvent) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	meta := p.getMetadataForUpdate()
-	p.updateReplicas(meta, update.Keyspace)
-	p.metadata.Store(meta)
 }
 
 func (p *ybPartitionAwareHostPolicy) Init(s *Session) {
-	p.getKeyspaceMetadata = s.KeyspaceMetadata
-	p.getKeyspaceName = func() string { return s.cfg.Keyspace }
 	p.session = s
-	p.logger = s.logger
 }
 
 func (p *ybPartitionAwareHostPolicy) IsLocal(host *HostInfo) bool {
 	return p.fallback.IsLocal(host)
 }
 
-func (p *ybPartitionAwareHostPolicy) getMetadataReadOnly() *clusterMeta {
-	meta, _ := p.metadata.Load().(*clusterMeta)
-	return meta
-}
-
-// getMetadataForUpdate returns clusterMeta suitable for updating.
-// It is a SHALLOW copy of current metadata in case it was already set or new empty clusterMeta otherwise.
-// This function should be called with t.mu mutex locked and the mutex should not be released before
-// storing the new metadata.
-func (p *ybPartitionAwareHostPolicy) getMetadataForUpdate() *clusterMeta {
-	metaReadOnly := p.getMetadataReadOnly()
-	meta := new(clusterMeta)
-	if metaReadOnly != nil {
-		*meta = *metaReadOnly
-	}
-	return meta
-}
-
-func (p *ybPartitionAwareHostPolicy) updateReplicas(meta *clusterMeta, keyspace string) {
-	newReplicas := make(map[string]tokenRingReplicas, len(meta.replicas))
-
-	ks, err := p.getKeyspaceMetadata(keyspace)
-	if err == nil {
-		strat := getStrategy(ks, p.logger)
-		if strat != nil {
-			if meta != nil && meta.tokenRing != nil {
-				newReplicas[keyspace] = strat.replicaMap(meta.tokenRing)
-			}
-		}
-	}
-
-	for ks, replicas := range meta.replicas {
-		if ks != keyspace {
-			newReplicas[ks] = replicas
-		}
-	}
-
-	meta.replicas = newReplicas
-}
-
 func (p *ybPartitionAwareHostPolicy) AddHost(host *HostInfo) {
-	p.mu.Lock()
-	if p.hosts.add(host) {
-		meta := p.getMetadataForUpdate()
-		meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
-		p.updateReplicas(meta, p.getKeyspaceName())
-		p.metadata.Store(meta)
-	}
-	p.mu.Unlock()
-
 	p.fallback.AddHost(host)
 }
 
@@ -727,44 +664,18 @@ func (p *ybPartitionAwareHostPolicy) HostDown(host *HostInfo) {
 }
 
 func (p *ybPartitionAwareHostPolicy) RemoveHost(host *HostInfo) {
-	p.mu.Lock()
-	if p.hosts.remove(host.ConnectAddress()) {
-		meta := p.getMetadataForUpdate()
-		meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
-		p.updateReplicas(meta, p.getKeyspaceName())
-		p.metadata.Store(meta)
-	}
-	p.mu.Unlock()
-
 	p.fallback.RemoveHost(host)
 }
 
 func (p *ybPartitionAwareHostPolicy) SetPartitioner(partitioner string) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.partitioner != partitioner {
-		p.fallback.SetPartitioner(partitioner)
-		p.partitioner = partitioner
-		meta := p.getMetadataForUpdate()
-		meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
-		p.updateReplicas(meta, p.getKeyspaceName())
-		p.metadata.Store(meta)
-	}
+	p.fallback.SetPartitioner(partitioner)
 }
 
 func (p *ybPartitionAwareHostPolicy) AddHosts(hosts []*HostInfo) {
 	p.mu.Lock()
-
 	for _, host := range hosts {
 		p.hosts.add(host)
 	}
-
-	meta := p.getMetadataForUpdate()
-	meta.resetTokenRing(p.partitioner, p.hosts.get(), p.logger)
-	p.updateReplicas(meta, p.getKeyspaceName())
-	p.metadata.Store(meta)
-
 	p.mu.Unlock()
 
 	for _, host := range hosts {
@@ -807,6 +718,14 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 	start := tablesplitmetadeta.Floor(key)
 	replicas = (tablesplitmetadeta.getHosts(start))
 
+	// When the CQL consistency level is set to YB consistent prefix (Cassandra ONE),
+	// the reads would end up going only to the leader if the list of hosts are not shuffled.
+	if qry.GetConsistency().String() == "ONE" {
+		rand.Seed(time.Now().UnixNano())
+		rand.Shuffle(len(replicas), func(a, b int) {
+			replicas[a], replicas[b] = replicas[b], replicas[a]
+		})
+	}
 	var (
 		fallbackIter NextHost
 		i, j         int
@@ -819,7 +738,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 			h := replicas[i]
 			i++
 
-			if !p.fallback.IsLocal(h) {
+			if !p.fallback.IsLocal(h) && !(qry.GetConsistency().String() == "QUORUM") {
 				remote = append(remote, h)
 				continue
 			}
