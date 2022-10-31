@@ -191,6 +191,256 @@ func TestHostRouting(t *testing.T) {
 
 }
 
+func TestHostRoutingIndex(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	hosts, _, err := session.hostSource.GetHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		Beforeread  int = 0
+		Beforewrite int = 0
+		Totalread   int = 0
+		Totalwrite  int = 0
+	)
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Beforeread += read
+		Beforewrite += write
+	}
+
+	NUM_KEYS := 100
+
+	//create keyspace
+	var createStmtk = "create keyspace IF NOT EXISTS example"
+	if err := session.Query(createStmtk).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create test table.
+	var createStmt1 = "create table IF NOT EXISTS example.test_lb_idx (h1 int, h2 text, c int,j jsonb, primary key ((h1,h2))) with transactions = { 'enabled' : true };"
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	var createindex1 = "create index test_lb_idx_1 on example.test_lb_idx (h1) include (c);"
+	if err := session.Query(createindex1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	var createindex2 = "create index test_lb_idx_2 on example.test_lb_idx (c);"
+	if err := session.Query(createindex2).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	var createindex3 = "create index test_lb_idx_3 on example.test_lb_idx (j->>'a');"
+	if err := session.Query(createindex3).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query("insert into example.test_lb_idx (h1, h2, c, j) values (?, ?, ?, ?)", i, strconv.Itoa(i), i, strconv.Itoa(i)).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.test_lb_idx where h1 = ?;`, i).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", i, c)
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select h1, h2 from example.test_lb_idx where c = ?;`, i).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.test_lb_idx where j = ?;`, strconv.Itoa(i)).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", i, c)
+	}
+
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Totalread += read
+		Totalwrite += write
+	}
+
+	Totalread -= Beforeread
+	Totalwrite -= Beforewrite
+
+	if Totalread < (NUM_KEYS*7*3)/10 && Totalwrite < (NUM_KEYS*7)/10 {
+		t.Fatalf("Less number of local read or write are happening, local read = %d, local write = %d ", Totalread, Totalwrite)
+	}
+}
+
+func TestHostRoutingBatch(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	hosts, _, err := session.hostSource.GetHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		Beforeread  int = 0
+		Beforewrite int = 0
+		Totalread   int = 0
+		Totalwrite  int = 0
+	)
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Beforeread += read
+		Beforewrite += write
+	}
+
+	NUM_KEYS := 100
+
+	//create keyspace
+	var createStmtk = "create keyspace IF NOT EXISTS example"
+	if err := session.Query(createStmtk).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create test table.
+	var createStmt1 = "create table example.test_lb (h int, r text, c int, primary key ((h), r));"
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	stmt := "insert into example.test_lb (h, r, c) values (?, ?, ?);"
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		batch := session.NewBatch(LoggedBatch)
+		for j := 1; j <= 5; j++ {
+			batch.Query(stmt, i, strconv.Itoa(j), i)
+		}
+		err := session.ExecuteBatch(batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.test_lb where h = ? and r = '1';`, i).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", i, c)
+	}
+
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Totalread += read
+		Totalwrite += write
+	}
+
+	Totalread -= Beforeread
+	Totalwrite -= Beforewrite
+
+	if Totalread < (NUM_KEYS*7)/10 && Totalwrite < (NUM_KEYS*7)/10 {
+		t.Fatalf("Less number of local read or write are happening, local read = %d, local write = %d ", Totalread, Totalwrite)
+	}
+}
+
+// The cluster should be created with the following tags:
+//--tserver_flags="cql_nodelist_refresh_interval_secs=10" --master_flags="tserver_unresponsive_timeout_ms=10000"
+func TestCreateDropTable(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	MAX_WAIT_SECONDS := 10
+
+	//Create Keyspace
+	var createStmtk = "create keyspace IF NOT EXISTS example"
+	if err := session.Query(createStmtk).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create test table. Verify that the PartitionMetadata gets notified of the table creation
+	// and loads the metadata.
+	var createStmt1 = "create table example.test_partition1 (k int primary key);"
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+
+	for i := 0; i < MAX_WAIT_SECONDS; i++ {
+		partitionMap := getTableSplitMetadata("example", "test_partition1")
+		if len(partitionMap.getHosts(0)) > 0 {
+			found = true
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	assertEqual(t, "", true, found)
+
+	// Drop test table. Verify that the PartitionMetadata gets notified of the table drop
+	// and clears the the metadata.
+	var dropStmt1 = "Drop table example.test_partition1;"
+	if err := session.Query(dropStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MAX_WAIT_SECONDS; i++ {
+		partitionMap := getTableSplitMetadata("example", "test_partition1")
+		if len(partitionMap.getHosts(0)) == 0 {
+			found = false
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	assertEqual(t, "", false, found)
+}
+
 func check(q *Query, i int64, t *testing.T) {
 	key, err := q.GetRoutingKeyYb()
 	if err != nil || len(key) == 0 {
