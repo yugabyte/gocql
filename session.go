@@ -1092,39 +1092,18 @@ func (q *Query) KeyspaceAndTableYb() (string, string) {
 	)
 
 	conn := q.session.getConn()
-	if conn == nil {
-		goto Next
+	if conn != nil {
+		info, err = conn.prepareStatement(q.Context(), q.stmt, nil)
+		if err == nil {
+			table = info.request.columns[0].Table
+			keyspace = info.request.columns[0].Keyspace
+			if table != "" && keyspace != "" {
+				return keyspace, table
+			}
+		}
 	}
-	info, err = conn.prepareStatement(q.Context(), q.stmt, nil)
-	if err != nil {
-		goto Next
-	}
-	table = info.request.columns[0].Table
-	keyspace = info.request.columns[0].Keyspace
-	if table == "" || keyspace == "" {
-		goto Next
-	}
-	return keyspace, table
 
-Next:
-	res := strings.Fields(q.stmt)
-	var i int
-	for i = 0; i < len(res); i++ {
-		res1 := strings.Contains(res[i], ".")
-		if res1 {
-			break
-		}
-	}
-	if i != len(res) {
-		res2 := strings.Split(res[i], ".")
-		if res2 == nil {
-			return "", ""
-		}
-		res3 := strings.Split(res2[1], "(")
-		return res2[0], res3[0]
-	} else {
-		return "", ""
-	}
+	return "", ""
 }
 
 // GetRoutingKey gets the routing key to use for routing this query. If
@@ -1702,7 +1681,7 @@ type Batch struct {
 	cancelBatch           func()
 	keyspace              string
 	metrics               *queryMetrics
-	i                     int //to keep track of which statement in the batch is the first bound statement
+	firstBoundStmtIdxYB   int //to keep track of which statement in the batch is the first bound statement
 }
 
 // NewBatch creates a new batch operation without defaults from the cluster
@@ -1760,7 +1739,7 @@ func (b *Batch) KeyspaceAndTableYb() (string, string) {
 	if b.session == nil {
 		return "", ""
 	}
-	if b.i == -1 {
+	if b.firstBoundStmtIdxYB == -1 {
 		return "", ""
 	}
 
@@ -1772,39 +1751,18 @@ func (b *Batch) KeyspaceAndTableYb() (string, string) {
 	)
 
 	conn := b.session.getConn()
-	if conn == nil {
-		goto Next1
+	if conn != nil {
+		info, err = conn.prepareStatement(b.Context(), b.Entries[b.firstBoundStmtIdxYB].Stmt, nil)
+		if err == nil {
+			table = info.request.columns[0].Table
+			keyspace = info.request.columns[0].Keyspace
+			if table != "" && keyspace != "" {
+				return keyspace, table
+			}
+		}
 	}
-	info, err = conn.prepareStatement(b.Context(), b.Entries[b.i].Stmt, nil)
-	if err != nil {
-		goto Next1
-	}
-	table = info.request.columns[0].Table
-	keyspace = info.request.columns[0].Keyspace
-	if table == "" || keyspace == "" {
-		goto Next1
-	}
-	return keyspace, table
 
-Next1:
-	res := strings.Fields(b.Entries[b.i].Stmt)
-	var i int
-	for i = 0; i < len(res); i++ {
-		res1 := strings.Contains(res[i], ".")
-		if res1 {
-			break
-		}
-	}
-	if i != len(res) {
-		res2 := strings.Split(res[i], ".")
-		if res2 == nil {
-			return "", ""
-		}
-		res3 := strings.Split(res2[1], "(")
-		return res2[0], res3[0]
-	} else {
-		return "", ""
-	}
+	return "", ""
 }
 
 // Attempts returns the number of attempts made to execute the batch.
@@ -2032,10 +1990,10 @@ func (b *Batch) GetRoutingKeyYb() ([]byte, error) {
 		}
 	}
 	if i == len(b.Entries) || result == nil {
-		b.i = -1
+		b.firstBoundStmtIdxYB = -1
 		return nil, nil
 	} else {
-		b.i = i
+		b.firstBoundStmtIdxYB = i
 		return result, nil
 	}
 }
