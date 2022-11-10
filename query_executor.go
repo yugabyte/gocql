@@ -12,7 +12,9 @@ type ExecutableQuery interface {
 	retryPolicy() RetryPolicy
 	speculativeExecutionPolicy() SpeculativeExecutionPolicy
 	GetRoutingKey() ([]byte, error)
+	GetRoutingKeyYb() ([]byte, error)
 	Keyspace() string
+	KeyspaceAndTableYb() (string, string)
 	IsIdempotent() bool
 
 	withContext(context.Context) ExecutableQuery

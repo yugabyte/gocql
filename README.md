@@ -1,10 +1,9 @@
 gocql
 =====
 
-Package gocql implements a fast and robust Cassandra client for the
-Go programming language.
+Package gocql implements a fast and robust Cassandra client for the Go programming language. This fork of gocql also supports YugabyteDB's Partition-Aware-Policy.
 
-Documentation: https://docs.yugabyte.com/latest/develop/build-apps/go/ 
+Documentation: [Getting started guide](https://docs.yugabyte.com/preview/drivers-orms/go/ycql/)
 
 Discussions: https://www.yugabyte.com/slack
 

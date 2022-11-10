@@ -145,7 +145,7 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	s.hostSource = &ringDescriber{session: s}
 
 	if cfg.PoolConfig.HostSelectionPolicy == nil {
-		cfg.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
+		cfg.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
 	}
 	s.pool = cfg.PoolConfig.buildPool(s)
 
@@ -1078,6 +1078,34 @@ func (q *Query) Keyspace() string {
 	return q.session.cfg.Keyspace
 }
 
+func (q *Query) KeyspaceAndTableYb() (string, string) {
+
+	if q.session == nil {
+		return "", ""
+	}
+
+	var (
+		table    string = ""
+		keyspace string = ""
+		info     *preparedStatment
+		err      error
+	)
+
+	conn := q.session.getConn()
+	if conn != nil {
+		info, err = conn.prepareStatement(q.Context(), q.stmt, nil)
+		if err == nil {
+			table = info.request.columns[0].Table
+			keyspace = info.request.columns[0].Keyspace
+			if table != "" && keyspace != "" {
+				return keyspace, table
+			}
+		}
+	}
+
+	return "", ""
+}
+
 // GetRoutingKey gets the routing key to use for routing this query. If
 // a routing key has not been explicitly set, then the routing key will
 // be constructed if possible using the keyspace's schema and the query
@@ -1101,6 +1129,25 @@ func (q *Query) GetRoutingKey() ([]byte, error) {
 	}
 
 	return createRoutingKey(routingKeyInfo, q.values)
+}
+
+func (q *Query) GetRoutingKeyYb() ([]byte, error) {
+	if q.routingKey != nil {
+		return q.routingKey, nil
+	} else if q.binding != nil && len(q.values) == 0 {
+		// If this query was created using session.Bind we wont have the query
+		// values yet, so we have to pass down to the next policy.
+		// TODO: Remove this and handle this case
+		return nil, nil
+	}
+
+	// try to determine the routing key
+	routingKeyInfo, err := q.session.routingKeyInfo(q.Context(), q.stmt)
+	if err != nil {
+		return nil, err
+	}
+
+	return createRoutingKeyYb(routingKeyInfo, q.values)
 }
 
 func (q *Query) shouldPrepare() bool {
@@ -1634,6 +1681,7 @@ type Batch struct {
 	cancelBatch           func()
 	keyspace              string
 	metrics               *queryMetrics
+	firstBoundStmtIdxYB   int //to keep track of which statement in the batch is the first bound statement
 }
 
 // NewBatch creates a new batch operation without defaults from the cluster
@@ -1684,6 +1732,37 @@ func (b *Batch) Observer(observer BatchObserver) *Batch {
 
 func (b *Batch) Keyspace() string {
 	return b.keyspace
+}
+
+func (b *Batch) KeyspaceAndTableYb() (string, string) {
+
+	if b.session == nil {
+		return "", ""
+	}
+	if b.firstBoundStmtIdxYB == -1 {
+		return "", ""
+	}
+
+	var (
+		table    string = ""
+		keyspace string = ""
+		info     *preparedStatment
+		err      error
+	)
+
+	conn := b.session.getConn()
+	if conn != nil {
+		info, err = conn.prepareStatement(b.Context(), b.Entries[b.firstBoundStmtIdxYB].Stmt, nil)
+		if err == nil {
+			table = info.request.columns[0].Table
+			keyspace = info.request.columns[0].Keyspace
+			if table != "" && keyspace != "" {
+				return keyspace, table
+			}
+		}
+	}
+
+	return "", ""
 }
 
 // Attempts returns the number of attempts made to execute the batch.
@@ -1877,6 +1956,48 @@ func (b *Batch) GetRoutingKey() ([]byte, error) {
 	return createRoutingKey(routingKeyInfo, entry.Args)
 }
 
+func (b *Batch) GetRoutingKeyYb() ([]byte, error) {
+	if b.routingKey != nil {
+		return b.routingKey, nil
+	}
+
+	if len(b.Entries) == 0 {
+		return nil, nil
+	}
+
+	var result []byte
+	i := 0
+	for i = 0; i < len(b.Entries); i++ {
+		entry := b.Entries[i]
+		if entry.binding != nil {
+			// bindings do not have the values let's skip it like Query does.
+			continue
+		}
+
+		// try to determine the routing key
+		routingKeyInfo, err := b.session.routingKeyInfo(b.Context(), entry.Stmt)
+		if err != nil {
+			continue
+		}
+		if routingKeyInfo == nil {
+			continue
+		}
+		result, err = createRoutingKeyYb(routingKeyInfo, entry.Args)
+		if err != nil {
+			continue
+		} else {
+			break
+		}
+	}
+	if i == len(b.Entries) || result == nil {
+		b.firstBoundStmtIdxYB = -1
+		return nil, nil
+	} else {
+		b.firstBoundStmtIdxYB = i
+		return result, nil
+	}
+}
+
 func createRoutingKey(routingKeyInfo *routingKeyInfo, values []interface{}) ([]byte, error) {
 	if routingKeyInfo == nil {
 		return nil, nil
@@ -1909,6 +2030,39 @@ func createRoutingKey(routingKeyInfo *routingKeyInfo, values []interface{}) ([]b
 		buf.Write(lenBuf)
 		buf.Write(encoded)
 		buf.WriteByte(0x00)
+	}
+	routingKey := buf.Bytes()
+	return routingKey, nil
+}
+
+func createRoutingKeyYb(routingKeyInfo *routingKeyInfo, values []interface{}) ([]byte, error) {
+	if routingKeyInfo == nil {
+		return nil, nil
+	}
+
+	if len(routingKeyInfo.indexes) == 1 {
+		// single column routing key
+		routingKey, err := MarshalYb(
+			routingKeyInfo.types[0],
+			values[routingKeyInfo.indexes[0]],
+		)
+		if err != nil {
+			return nil, err
+		}
+		return routingKey, nil
+	}
+
+	// composite routing key
+	buf := bytes.NewBuffer(make([]byte, 0, 256))
+	for i := range routingKeyInfo.indexes {
+		encoded, err := MarshalYb(
+			routingKeyInfo.types[i],
+			values[routingKeyInfo.indexes[i]],
+		)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(encoded)
 	}
 	routingKey := buf.Bytes()
 	return routingKey, nil

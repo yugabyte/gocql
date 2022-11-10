@@ -7,12 +7,567 @@ package gocql
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net"
+	"net/http"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/hailocab/go-hostpool"
+	inf "gopkg.in/inf.v0"
 )
+
+func OnPage(link string, t *testing.T) string {
+	res, err := http.Get(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content, err := ioutil.ReadAll(res.Body)
+	res.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(content)
+}
+
+func localReadAndWrite(s string, t *testing.T) (int, int) {
+
+	value := strings.Index(s, "handler_latency_yb_client_read_local")
+	line := s[value+70:]
+	l := strings.Split(line, ",")
+	read, err := strconv.Atoi(l[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	value1 := strings.Index(s, "handler_latency_yb_client_write_local")
+	line1 := s[value1+71:]
+	l1 := strings.Split(line1, ",")
+	write, err := strconv.Atoi(l1[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	return read, write
+}
+
+//Test of PartitionAwarePolicy, to see if it routes query to the correct host
+
+// With PartitionAwarePolicy, all calls should be local ideally but there is no
+// 100% guarantee
+// because as soon as the test table has been created and the partition metadata
+// has been
+// loaded, the cluster's load-balancer may still be rebalancing the leaders.
+// It may happen that the Test Fail sometimes do to above reason but should pass Majority of the times
+func TestHostRouting(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	hosts, _, err := session.hostSource.GetHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		Beforeread  int = 0
+		Beforewrite int = 0
+		Totalread   int = 0
+		Totalwrite  int = 0
+	)
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Beforeread += read
+		Beforewrite += write
+	}
+
+	NUM_KEYS := 100
+
+	//create keyspace
+	var createStmtk = "create keyspace IF NOT EXISTS example"
+	if err := session.Query(createStmtk).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	//Datatype Text, Composite Partition Key
+	// Create test table.
+	var createStmt1 = "create table IF NOT EXISTS example.testtext2 (h1 text, h2 text, c int, primary key ((h1,h2)));"
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	//Datatype: float and double, Composite Partition Key
+	// Create test table.
+	var createStmt = "create table IF NOT EXISTS example.testfloat2 (h1 float, h2 double, c int, primary key ((h1, h2)));"
+	if err := session.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query("insert into example.testtext2 (h1, h2, c) values (?, ?, ?)", strconv.Itoa(i), strconv.Itoa(i), i).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query("update example.testtext2 set c = ? where h2 = ? and h1 = ?", i*2, strconv.Itoa(i), strconv.Itoa(i)).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.testtext2 where h2 = ? and h1 = ?`, strconv.Itoa(i), strconv.Itoa(i)).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", 2*i, c)
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query(" delete from example.testtext2 where h2 = ? and h1 = ?", strconv.Itoa(i), strconv.Itoa(i)).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query("insert into example.testfloat2 (h1, h2, c) values (?, ?, ?)", float32(i), float64(i)+1.070701, i).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query("update example.testfloat2 set c = ? where h1 = ? and h2 = ?", i*2, float32(i), float64(i)+1.070701).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.testfloat2 where h1 = ? and h2 = ?`, float32(i), float64(i)+1.070701).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", 2*i, c)
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query(" delete from example.testfloat2 where h1 = ? and h2 = ?", float32(i), float64(i)+1.070701).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Totalread += read
+		Totalwrite += write
+	}
+
+	Totalread -= Beforeread
+	Totalwrite -= Beforewrite
+
+	if Totalread < (NUM_KEYS*7*2)/10 && Totalwrite < (NUM_KEYS*6*7)/10 {
+		t.Fatalf("Less number of local read or write are happening, local read = %d, local write = %d ", Totalread, Totalwrite)
+	}
+
+}
+
+func TestHostRoutingIndex(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	hosts, _, err := session.hostSource.GetHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		Beforeread  int = 0
+		Beforewrite int = 0
+		Totalread   int = 0
+		Totalwrite  int = 0
+	)
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Beforeread += read
+		Beforewrite += write
+	}
+
+	NUM_KEYS := 100
+
+	//create keyspace
+	var createStmtk = "create keyspace IF NOT EXISTS example"
+	if err := session.Query(createStmtk).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create test table.
+	var createStmt1 = "create table IF NOT EXISTS example.test_lb_idx (h1 int, h2 text, c int,j jsonb, primary key ((h1,h2))) with transactions = { 'enabled' : true };"
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	var createindex1 = "create index test_lb_idx_1 on example.test_lb_idx (h1) include (c);"
+	if err := session.Query(createindex1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	var createindex2 = "create index test_lb_idx_2 on example.test_lb_idx (c);"
+	if err := session.Query(createindex2).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	var createindex3 = "create index test_lb_idx_3 on example.test_lb_idx (j->>'a');"
+	if err := session.Query(createindex3).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		err := session.Query("insert into example.test_lb_idx (h1, h2, c, j) values (?, ?, ?, ?)", i, strconv.Itoa(i), i, strconv.Itoa(i)).Exec()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.test_lb_idx where h1 = ?;`, i).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", i, c)
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select h1, h2 from example.test_lb_idx where c = ?;`, i).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.test_lb_idx where j = ?;`, strconv.Itoa(i)).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", i, c)
+	}
+
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Totalread += read
+		Totalwrite += write
+	}
+
+	Totalread -= Beforeread
+	Totalwrite -= Beforewrite
+
+	if Totalread < (NUM_KEYS*7*3)/10 && Totalwrite < (NUM_KEYS*7)/10 {
+		t.Fatalf("Less number of local read or write are happening, local read = %d, local write = %d ", Totalread, Totalwrite)
+	}
+}
+
+func TestHostRoutingBatch(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	hosts, _, err := session.hostSource.GetHosts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var (
+		Beforeread  int = 0
+		Beforewrite int = 0
+		Totalread   int = 0
+		Totalwrite  int = 0
+	)
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Beforeread += read
+		Beforewrite += write
+	}
+
+	NUM_KEYS := 100
+
+	//create keyspace
+	var createStmtk = "create keyspace IF NOT EXISTS example"
+	if err := session.Query(createStmtk).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create test table.
+	var createStmt1 = "create table example.test_lb (h int, r text, c int, primary key ((h), r));"
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	stmt := "insert into example.test_lb (h, r, c) values (?, ?, ?);"
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		batch := session.NewBatch(LoggedBatch)
+		for j := 1; j <= 5; j++ {
+			batch.Query(stmt, i, strconv.Itoa(j), i)
+		}
+		err := session.ExecuteBatch(batch)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	for i := 1; i <= NUM_KEYS; i++ {
+		stmt := session.Query(`select c from example.test_lb where h = ? and r = '1';`, i).Iter()
+		if stmt == nil {
+			t.Fatal(stmt)
+		}
+		var c int
+		stmt.Scan(&c)
+		assertEqual(t, "c value", i, c)
+	}
+
+	for i := 0; i < len(hosts); i++ {
+		s := "http://" + hosts[i].connectAddress.String() + ":9000/metrics"
+		content := OnPage(s, t)
+		read, write := localReadAndWrite(content, t)
+		Totalread += read
+		Totalwrite += write
+	}
+
+	Totalread -= Beforeread
+	Totalwrite -= Beforewrite
+
+	if Totalread < (NUM_KEYS*7)/10 && Totalwrite < (NUM_KEYS*7)/10 {
+		t.Fatalf("Less number of local read or write are happening, local read = %d, local write = %d ", Totalread, Totalwrite)
+	}
+}
+
+// The cluster should be created with the following tags:
+//--tserver_flags="cql_nodelist_refresh_interval_secs=10" --master_flags="tserver_unresponsive_timeout_ms=10000"
+func TestCreateDropTable(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	MAX_WAIT_SECONDS := 10
+
+	//Create Keyspace
+	var createStmtk = "create keyspace IF NOT EXISTS example"
+	if err := session.Query(createStmtk).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create test table. Verify that the PartitionMetadata gets notified of the table creation
+	// and loads the metadata.
+	var createStmt1 = "create table example.test_partition1 (k int primary key);"
+	if err := session.Query(createStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+
+	for i := 0; i < MAX_WAIT_SECONDS; i++ {
+		partitionMap := getTableSplitMetadata("example", "test_partition1")
+		if len(partitionMap.getHosts(0)) > 0 {
+			found = true
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	assertEqual(t, "", true, found)
+
+	// Drop test table. Verify that the PartitionMetadata gets notified of the table drop
+	// and clears the the metadata.
+	var dropStmt1 = "Drop table example.test_partition1;"
+	if err := session.Query(dropStmt1).Exec(); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < MAX_WAIT_SECONDS; i++ {
+		partitionMap := getTableSplitMetadata("example", "test_partition1")
+		if len(partitionMap.getHosts(0)) == 0 {
+			found = false
+			break
+		}
+		time.Sleep(1 * time.Second)
+	}
+	assertEqual(t, "", false, found)
+}
+
+func check(q *Query, i int64, t *testing.T) {
+	key, err := q.GetRoutingKeyYb()
+	if err != nil || len(key) == 0 {
+		t.Fatal(err)
+	}
+	Key := GetKey(key)
+	if Key != i {
+		t.Fatalf("expected %d key value got %d", i, Key)
+	}
+}
+
+func createTables(t *testing.T, s *Session) {
+
+	createStmt := "CREATE Keyspace IF NOT EXISTS example;"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_int_2 (h1 int, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_decimal_2 (h1 decimal, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_time_1 (h1 timestamp, h2 text, h3 int, c int, primary key (h1,h2,h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_date_2 (h1 date, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_uuid_2 (h1 uuid, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_inet_2 (h1 inet, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_bool_2 (h1 boolean, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_tinyint_2 (h1 tinyint, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+	createStmt = "create table IF NOT EXISTS example.test_smallint_2 (h1 smallint, h2 text, h3 int, c int, primary key ((h1,h2),h3));"
+	if err := s.Query(createStmt).Exec(); err != nil {
+		t.Fatal(err)
+	}
+
+}
+
+//Test of Getkey function written for PartitionAwarePolicy
+func TestGetKey(t *testing.T) {
+	//change the ip address according to the cluster
+	cluster := NewCluster("127.0.0.1")
+	cluster.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	cluster.Timeout = 5 * time.Second
+
+	session, err := cluster.CreateSession()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer session.Close()
+
+	createTables(t, session)
+
+	//Hash value of these queries are taken from java-driver and are being matched with the hash that gocql gives for the queries.
+
+	//int composite partition key
+	qry1 := session.Query("select c from example.test_int_2 where h1 = ? and h2= ?", 100, "100")
+	check(qry1, 46090, t)
+
+	//decimal composite partition key
+	qry2 := session.Query("select c from example.test_decimal_2 where h1 = ? and h2 = ?", inf.NewDec(int64(90), 0), strconv.Itoa(90))
+	check(qry2, 57745, t)
+
+	//timestamp composite partition key
+	t1, err := time.Parse("2006-01-02 15:04:05.000", "2011-02-03 12:12:12.555")
+	if err != nil {
+		t.Fatal(err)
+	}
+	qry3 := session.Query("select c from example.test_time_1 where h1 = ?", t1)
+	check(qry3, 37279, t)
+
+	//date composite partition key
+	t2, err := time.Parse("2006-01-02", "2011-02-03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	qry4 := session.Query("select c from example.test_date_2 where h1 = ? and h2 = ?", t2, "o")
+	check(qry4, 32877, t)
+
+	//uuid composite partition key
+	qry5 := session.Query("select c from example.test_uuid_2 where h1 = ? and h2 = ?", "123e4567-e89b-12d3-a456-426614174000", "o")
+	check(qry5, 38835, t)
+
+	//inet composite partition key
+	qry6 := session.Query("select c from example.test_inet_2 where h1 = ? and h2 = ?", "127.0.0.1", "o")
+	check(qry6, 16064, t)
+
+	//bool composite partition key
+	qry7 := session.Query("select c from example.test_bool_2 where h1 = ? and h2 = ?", false, "o")
+	check(qry7, 57256, t)
+
+	//tinyint composite partition key
+	qry8 := session.Query("select c from example.test_tinyint_2 where h1 = ? and h2 = ?", 1, "o")
+	check(qry8, 48500, t)
+
+	//Smallint composite partition key
+	qry9 := session.Query("select c from example.test_smallint_2 where h1 = ? and h2 = ?", 2, "o")
+	check(qry9, 26643, t)
+
+}
 
 // Tests of the round-robin host selection policy implementation
 func TestRoundRobbin(t *testing.T) {

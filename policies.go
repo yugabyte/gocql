@@ -620,6 +620,163 @@ func (t *tokenAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 	}
 }
 
+func YBPartitionAwareHostPolicy(fallback HostSelectionPolicy, opts ...func(*ybPartitionAwareHostPolicy)) HostSelectionPolicy {
+	p := &ybPartitionAwareHostPolicy{fallback: fallback}
+	for _, opt := range opts {
+		opt(p)
+	}
+	return p
+}
+
+type ybPartitionAwareHostPolicy struct {
+	fallback                 HostSelectionPolicy
+	nonLocalReplicasFallback bool
+
+	// mu protects writes to hosts
+	// reads can be unlocked as long as they are not used for updating state later.
+	mu    sync.Mutex
+	hosts cowHostList
+
+	session *Session
+}
+
+func (p *ybPartitionAwareHostPolicy) KeyspaceChanged(update KeyspaceUpdateEvent) {
+}
+
+func (p *ybPartitionAwareHostPolicy) Init(s *Session) {
+	p.session = s
+}
+
+func (p *ybPartitionAwareHostPolicy) IsLocal(host *HostInfo) bool {
+	return p.fallback.IsLocal(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) AddHost(host *HostInfo) {
+	p.fallback.AddHost(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) HostUp(host *HostInfo) {
+	p.fallback.HostUp(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) HostDown(host *HostInfo) {
+	p.fallback.HostDown(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) RemoveHost(host *HostInfo) {
+	p.fallback.RemoveHost(host)
+}
+
+func (p *ybPartitionAwareHostPolicy) SetPartitioner(partitioner string) {
+	p.fallback.SetPartitioner(partitioner)
+}
+
+func (p *ybPartitionAwareHostPolicy) AddHosts(hosts []*HostInfo) {
+	p.mu.Lock()
+	for _, host := range hosts {
+		p.hosts.add(host)
+	}
+	p.mu.Unlock()
+
+	for _, host := range hosts {
+		p.fallback.AddHost(host)
+	}
+}
+
+func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
+	if qry == nil {
+		return p.fallback.Pick(qry)
+	}
+
+	routingKey, err := qry.GetRoutingKeyYb()
+	if err != nil {
+		return p.fallback.Pick(qry)
+	} else if routingKey == nil {
+		return p.fallback.Pick(qry)
+	}
+
+	key := GetKey(routingKey)
+	var replicas []*HostInfo
+
+	keyspacename, tablename := qry.KeyspaceAndTableYb()
+	if keyspacename == "" || tablename == "" {
+		return p.fallback.Pick(qry)
+	}
+
+	tablesplitmetadeta := getTableSplitMetadata(keyspacename, tablename)
+
+	if tablesplitmetadeta.partitionMap == nil {
+		p.session.hostSource.getClusterPartitionInfo()
+		tablesplitmetadeta1 := getTableSplitMetadata(keyspacename, tablename)
+		if tablesplitmetadeta1.partitionMap == nil {
+			return p.fallback.Pick(qry)
+		} else {
+			tablesplitmetadeta = tablesplitmetadeta1
+		}
+	}
+
+	start := tablesplitmetadeta.Floor(key)
+	replicas = (tablesplitmetadeta.getHosts(start))
+
+	// When the CQL consistency level is set to YB consistent prefix (Cassandra ONE),
+	// the reads would end up going only to the leader if the list of hosts are not shuffled.
+	if qry.GetConsistency().String() == "ONE" {
+		rand.Seed(time.Now().UnixNano())
+		rand.Shuffle(len(replicas), func(a, b int) {
+			replicas[a], replicas[b] = replicas[b], replicas[a]
+		})
+	}
+	var (
+		fallbackIter NextHost
+		i, j         int
+		remote       []*HostInfo
+	)
+
+	used := make(map[*HostInfo]bool, len(replicas))
+	return func() SelectedHost {
+		for i < len(replicas) {
+			h := replicas[i]
+			i++
+
+			if !p.fallback.IsLocal(h) && !(qry.GetConsistency().String() == "QUORUM") {
+				remote = append(remote, h)
+				continue
+			}
+			if h.IsUp() {
+				used[h] = true
+				return (*selectedHost)(h)
+			}
+		}
+
+		if p.nonLocalReplicasFallback {
+			for j < len(remote) {
+				h := remote[j]
+				j++
+
+				if h.IsUp() {
+					used[h] = true
+					return (*selectedHost)(h)
+				}
+			}
+		}
+
+		if fallbackIter == nil {
+			// fallback
+			fallbackIter = p.fallback.Pick(qry)
+		}
+
+		// filter the token aware selected hosts from the fallback hosts
+		for fallbackHost := fallbackIter(); fallbackHost != nil; fallbackHost = fallbackIter() {
+			if !used[fallbackHost.Info()] {
+				used[fallbackHost.Info()] = true
+				return fallbackHost
+			}
+		}
+
+		return nil
+	}
+}
+
 // HostPoolHostPolicy is a host policy which uses the bitly/go-hostpool library
 // to distribute queries between hosts and prevent sending queries to
 // unresponsive hosts. When creating the host pool that is passed to the policy
