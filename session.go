@@ -1166,7 +1166,7 @@ func (q *Query) shouldPrepare() bool {
 		}
 	}
 	switch stmtType {
-	case "select", "insert", "update", "delete", "batch":
+	case "select", "insert", "update", "delete", "batch", "transaction", "start":
 		return true
 	}
 	return false
