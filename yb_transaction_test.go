@@ -2,6 +2,7 @@ package gocql
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -69,6 +70,22 @@ func Test_YB_Trsansaction(t *testing.T) {
 	queryBuilder = "START TRANSACTION; UPDATE example.test1 USING TTL ? SET count = count + 1 WHERE test1_id = ? IF count + 1 <= ? ELSE ERROR; UPDATE example.test2 USING TTL ? SET count = count + 1 WHERE test2_id = ? IF count + 1 <= ? ELSE ERROR; COMMIT;"
 	if err = session.Query(queryBuilder).Bind(values...).Exec(); err != nil {
 		t.Fatal(err)
+	}
+
+	time.Sleep(5 * time.Second)
+	selectQry1 = session.Query("select count from example.test1 where test1_id = ?", 1)
+	selectQry1.Scan(&c)
+	assertEqual(t, "count value", 3, c)
+
+	selectQry2 = session.Query("select count from example.test2 where test2_id = ?", '1')
+	selectQry2.Scan(&c)
+	assertEqual(t, "count value", 3, c)
+
+	queryBuilder = "START TRANSACTION; UPDATE example.test1 USING TTL ? SET count = count + 1 WHERE test1_id = ? IF count + 1 <= ? ELSE ERROR; UPDATE example.test2 USING TTL ? SET count = count + 1 WHERE test2_id = ? IF count + 1 <= ? ELSE ERROR; COMMIT;"
+	if err = session.Query(queryBuilder).Bind(values...).Exec(); err != nil {
+		str := "Execution Error. Condition on table test1 was not satisfied."
+		errnew := fmt.Errorf(str)
+		assertEqual(t, "Error", errnew.Error(), strings.Split(err.Error(), "\n")[0])
 	}
 
 	time.Sleep(5 * time.Second)
