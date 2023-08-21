@@ -1160,13 +1160,13 @@ func (q *Query) shouldPrepare() bool {
 	if n := strings.IndexFunc(stmt, unicode.IsSpace); n >= 0 {
 		stmtType = strings.ToLower(stmt[:n])
 	}
-	if stmtType == "begin" {
+	if stmtType == "begin" || stmtType == "start" {
 		if n := strings.LastIndexFunc(stmt, unicode.IsSpace); n >= 0 {
 			stmtType = strings.ToLower(stmt[n+1:])
 		}
 	}
 	switch stmtType {
-	case "select", "insert", "update", "delete", "batch", "transaction", "start":
+	case "select", "insert", "update", "delete", "batch", "transaction", "commit":
 		return true
 	}
 	return false
