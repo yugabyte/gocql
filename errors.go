@@ -109,7 +109,7 @@ func (e errorFrame) Message() string {
 }
 
 func (e errorFrame) Error() string {
-	return e.Message()
+	return "code=" + fmt.Sprintf("%x", e.Code()) + "; message=" + e.Message()
 }
 
 func (e errorFrame) String() string {
