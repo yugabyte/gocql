@@ -384,7 +384,7 @@ func TestHostRoutingBatch(t *testing.T) {
 }
 
 // The cluster should be created with the following tags:
-//--tserver_flags="cql_nodelist_refresh_interval_secs=10" --master_flags="tserver_unresponsive_timeout_ms=10000"
+//--tserver_flags="cql_nodelist_refresh_interval_secs=8" --master_flags="tserver_unresponsive_timeout_ms=10000"
 func TestCreateDropTable(t *testing.T) {
 	//change the ip address according to the cluster
 	cluster := NewCluster("127.0.0.1")
