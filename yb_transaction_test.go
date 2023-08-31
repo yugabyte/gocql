@@ -83,9 +83,9 @@ func Test_YB_Trsansaction(t *testing.T) {
 
 	queryBuilder = "START TRANSACTION; UPDATE example.test1 USING TTL ? SET count = count + 1 WHERE test1_id = ? IF count + 1 <= ? ELSE ERROR; UPDATE example.test2 USING TTL ? SET count = count + 1 WHERE test2_id = ? IF count + 1 <= ? ELSE ERROR; COMMIT;"
 	if err = session.Query(queryBuilder).Bind(values...).Exec(); err != nil {
-		str := "Execution Error. Condition on table test1 was not satisfied."
-		errnew := fmt.Errorf(str)
-		assertEqual(t, "Error", errnew.Error(), strings.Split(err.Error(), "\n")[0])
+		errorStr := strings.Split(err.Error(), ";")
+		assertEqual(t, "Error", "code=2200", errorStr[0])
+		assertEqual(t, "Error", " message=Execution Error. Condition on table test1 was not satisfied.", strings.Split(errorStr[1], "\n")[0])
 	}
 
 	time.Sleep(5 * time.Second)
