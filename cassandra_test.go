@@ -1,3 +1,4 @@
+//go:build all || cassandra
 // +build all cassandra
 
 package gocql
@@ -67,7 +68,7 @@ func TestInvalidPeerEntry(t *testing.T) {
 	}
 }
 
-//TestUseStatementError checks to make sure the correct error is returned when the user tries to execute a use statement.
+// TestUseStatementError checks to make sure the correct error is returned when the user tries to execute a use statement.
 func TestUseStatementError(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -81,7 +82,7 @@ func TestUseStatementError(t *testing.T) {
 	}
 }
 
-//TestInvalidKeyspace checks that an invalid keyspace will return promptly and without a flood of connections
+// TestInvalidKeyspace checks that an invalid keyspace will return promptly and without a flood of connections
 func TestInvalidKeyspace(t *testing.T) {
 	cluster := createCluster()
 	cluster.Keyspace = "invalidKeyspace"
@@ -1189,7 +1190,7 @@ func TestRebindQueryInfo(t *testing.T) {
 	}
 }
 
-//TestStaticQueryInfo makes sure that the application can manually bind query parameters using the simplest possible static binding strategy
+// TestStaticQueryInfo makes sure that the application can manually bind query parameters using the simplest possible static binding strategy
 func TestStaticQueryInfo(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1257,7 +1258,7 @@ func upcaseInitial(str string) string {
 	return ""
 }
 
-//TestBoundQueryInfo makes sure that the application can manually bind query parameters using the query meta data supplied at runtime
+// TestBoundQueryInfo makes sure that the application can manually bind query parameters using the query meta data supplied at runtime
 func TestBoundQueryInfo(t *testing.T) {
 
 	session := createSession(t)
@@ -1296,7 +1297,7 @@ func TestBoundQueryInfo(t *testing.T) {
 
 }
 
-//TestBatchQueryInfo makes sure that the application can manually bind query parameters when executing in a batch
+// TestBatchQueryInfo makes sure that the application can manually bind query parameters when executing in a batch
 func TestBatchQueryInfo(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1371,7 +1372,7 @@ func injectInvalidPreparedStatement(t *testing.T, session *Session, table string
 	conn := getRandomConn(t, session)
 
 	flight := new(inflightPrepare)
-	key := session.stmtsLRU.keyFor(conn.addr, "", stmt)
+	key := session.stmtsLRU.keyFor(conn.host.HostID(), "", stmt)
 	session.stmtsLRU.add(key, flight)
 
 	flight.preparedStatment = &preparedStatment{
@@ -1474,7 +1475,7 @@ func TestQueryInfo(t *testing.T) {
 	}
 }
 
-//TestPreparedCacheEviction will make sure that the cache size is maintained
+// TestPreparedCacheEviction will make sure that the cache size is maintained
 func TestPrepare_PreparedCacheEviction(t *testing.T) {
 	const maxPrepared = 4
 
@@ -1538,28 +1539,28 @@ func TestPrepare_PreparedCacheEviction(t *testing.T) {
 	}
 
 	// Walk through all the configured hosts and test cache retention and eviction
-	for _, host := range session.cfg.Hosts {
-		_, ok := session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host+":9042", session.cfg.Keyspace, "SELECT id,mod FROM prepcachetest WHERE id = 0"))
+	for _, host := range session.ring.hosts {
+		_, ok := session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host.HostID(), session.cfg.Keyspace, "SELECT id,mod FROM prepcachetest WHERE id = 0"))
 		if ok {
 			t.Errorf("expected first select to be purged but was in cache for host=%q", host)
 		}
 
-		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host+":9042", session.cfg.Keyspace, "SELECT id,mod FROM prepcachetest WHERE id = 1"))
+		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host.HostID(), session.cfg.Keyspace, "SELECT id,mod FROM prepcachetest WHERE id = 1"))
 		if !ok {
 			t.Errorf("exepected second select to be in cache for host=%q", host)
 		}
 
-		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host+":9042", session.cfg.Keyspace, "INSERT INTO prepcachetest (id,mod) VALUES (?, ?)"))
+		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host.HostID(), session.cfg.Keyspace, "INSERT INTO prepcachetest (id,mod) VALUES (?, ?)"))
 		if !ok {
 			t.Errorf("expected insert to be in cache for host=%q", host)
 		}
 
-		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host+":9042", session.cfg.Keyspace, "UPDATE prepcachetest SET mod = ? WHERE id = ?"))
+		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host.HostID(), session.cfg.Keyspace, "UPDATE prepcachetest SET mod = ? WHERE id = ?"))
 		if !ok {
 			t.Errorf("expected update to be in cached for host=%q", host)
 		}
 
-		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host+":9042", session.cfg.Keyspace, "DELETE FROM prepcachetest WHERE id = ?"))
+		_, ok = session.stmtsLRU.lru.Get(session.stmtsLRU.keyFor(host.HostID(), session.cfg.Keyspace, "DELETE FROM prepcachetest WHERE id = ?"))
 		if !ok {
 			t.Errorf("expected delete to be cached for host=%q", host)
 		}
@@ -1613,7 +1614,7 @@ func TestPrepare_PreparedCacheKey(t *testing.T) {
 	}
 }
 
-//TestMarshalFloat64Ptr tests to see that a pointer to a float64 is marshalled correctly.
+// TestMarshalFloat64Ptr tests to see that a pointer to a float64 is marshalled correctly.
 func TestMarshalFloat64Ptr(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1627,7 +1628,7 @@ func TestMarshalFloat64Ptr(t *testing.T) {
 	}
 }
 
-//TestMarshalInet tests to see that a pointer to a float64 is marshalled correctly.
+// TestMarshalInet tests to see that a pointer to a float64 is marshalled correctly.
 func TestMarshalInet(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1787,7 +1788,7 @@ func TestVarint(t *testing.T) {
 	}
 }
 
-//TestQueryStats confirms that the stats are returning valid data. Accuracy may be questionable.
+// TestQueryStats confirms that the stats are returning valid data. Accuracy may be questionable.
 func TestQueryStats(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1816,7 +1817,7 @@ func TestIterHost(t *testing.T) {
 	}
 }
 
-//TestBatchStats confirms that the stats are returning valid data. Accuracy may be questionable.
+// TestBatchStats confirms that the stats are returning valid data. Accuracy may be questionable.
 func TestBatchStats(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -1914,8 +1915,8 @@ func TestBatchObserve(t *testing.T) {
 	}
 }
 
-//TestNilInQuery tests to see that a nil value passed to a query is handled by Cassandra
-//TODO validate the nil value by reading back the nil. Need to fix Unmarshalling.
+// TestNilInQuery tests to see that a nil value passed to a query is handled by Cassandra
+// TODO validate the nil value by reading back the nil. Need to fix Unmarshalling.
 func TestNilInQuery(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
@@ -2255,6 +2256,14 @@ func TestMaterializedViewMetadata(t *testing.T) {
 	if len(materializedViews) != 2 {
 		t.Fatal("expected two views")
 	}
+	expectedChunkLengthInKB := "16"
+	expectedDCLocalReadRepairChance := float64(0)
+	expectedSpeculativeRetry := "99p"
+	if flagCassVersion.Before(4, 0, 0) {
+		expectedChunkLengthInKB = "64"
+		expectedDCLocalReadRepairChance = 0.1
+		expectedSpeculativeRetry = "99PERCENTILE"
+	}
 	expectedView1 := MaterializedViewMetadata{
 		Keyspace:                "gocql_test",
 		Name:                    "view_view",
@@ -2263,14 +2272,14 @@ func TestMaterializedViewMetadata(t *testing.T) {
 		Caching:                 map[string]string{"keys": "ALL", "rows_per_partition": "NONE"},
 		Comment:                 "",
 		Compaction:              map[string]string{"class": "org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy", "max_threshold": "32", "min_threshold": "4"},
-		Compression:             map[string]string{"chunk_length_in_kb": "64", "class": "org.apache.cassandra.io.compress.LZ4Compressor"},
+		Compression:             map[string]string{"chunk_length_in_kb": expectedChunkLengthInKB, "class": "org.apache.cassandra.io.compress.LZ4Compressor"},
 		CrcCheckChance:          1,
-		DcLocalReadRepairChance: 0.1,
+		DcLocalReadRepairChance: expectedDCLocalReadRepairChance,
 		DefaultTimeToLive:       0,
 		Extensions:              map[string]string{},
 		GcGraceSeconds:          864000,
 		IncludeAllColumns:       false, MaxIndexInterval: 2048, MemtableFlushPeriodInMs: 0, MinIndexInterval: 128, ReadRepairChance: 0,
-		SpeculativeRetry: "99PERCENTILE",
+		SpeculativeRetry: expectedSpeculativeRetry,
 	}
 	expectedView2 := MaterializedViewMetadata{
 		Keyspace:                "gocql_test",
@@ -2280,14 +2289,14 @@ func TestMaterializedViewMetadata(t *testing.T) {
 		Caching:                 map[string]string{"keys": "ALL", "rows_per_partition": "NONE"},
 		Comment:                 "",
 		Compaction:              map[string]string{"class": "org.apache.cassandra.db.compaction.SizeTieredCompactionStrategy", "max_threshold": "32", "min_threshold": "4"},
-		Compression:             map[string]string{"chunk_length_in_kb": "64", "class": "org.apache.cassandra.io.compress.LZ4Compressor"},
+		Compression:             map[string]string{"chunk_length_in_kb": expectedChunkLengthInKB, "class": "org.apache.cassandra.io.compress.LZ4Compressor"},
 		CrcCheckChance:          1,
-		DcLocalReadRepairChance: 0.1,
+		DcLocalReadRepairChance: expectedDCLocalReadRepairChance,
 		DefaultTimeToLive:       0,
 		Extensions:              map[string]string{},
 		GcGraceSeconds:          864000,
 		IncludeAllColumns:       false, MaxIndexInterval: 2048, MemtableFlushPeriodInMs: 0, MinIndexInterval: 128, ReadRepairChance: 0,
-		SpeculativeRetry: "99PERCENTILE",
+		SpeculativeRetry: expectedSpeculativeRetry,
 	}
 
 	expectedView1.BaseTableId = materializedViews[0].BaseTableId
@@ -2731,7 +2740,7 @@ func TestNegativeStream(t *testing.T) {
 	const stream = -50
 	writer := frameWriterFunc(func(f *framer, streamID int) error {
 		f.writeHeader(0, opOptions, stream)
-		return f.finishWrite()
+		return f.finish()
 	})
 
 	frame, err := conn.exec(context.Background(), writer, nil)
@@ -3001,7 +3010,15 @@ func TestDiscoverViaProxy(t *testing.T) {
 
 	session.pool.mu.RLock()
 	for _, host := range clusterHosts {
-		if _, ok := session.pool.hostConnPools[host]; !ok {
+		found := false
+		for _, hi := range session.pool.hostConnPools {
+			if hi.host.ConnectAddress().String() == host {
+				found = true
+				break
+			}
+		}
+
+		if !found {
 			t.Errorf("missing host in pool after discovery: %q", host)
 		}
 	}
