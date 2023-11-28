@@ -1,11 +1,6 @@
 name: Build
 
-on:
-  push:
-    branches:
-      - master
-  pull_request:
-    types: [ opened, synchronize, reopened ]
+on: workflow_dispatch
 
 env:
   CCM_VERSION: "6e71061146f7ae67b84ccd2b1d90d7319b640e4c"
@@ -14,11 +9,6 @@ jobs:
   build:
     name: Unit tests
     runs-on: ubuntu-latest
-    container:
-      image: yugabytedb/yugabyte:latest
-      command: bin/yb-ctl create --tserver_flags="cql_nodelist_refresh_interval_secs=8" --master_flags="tserver_unresponsive_timeout_ms=10000"
-      ports:
-        - 9042:9042
     strategy:
       matrix:
         go: [ '1.19', '1.20' ]
