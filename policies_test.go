@@ -431,6 +431,10 @@ func TestCreateDropTable(t *testing.T) {
 	if err := session.Query(dropStmt1).Exec(); err != nil {
 		t.Fatal(err)
 	}
+
+	//Needed due to the fix of https://github.com/yugabyte/yugabyte-db/issues/17656.
+	time.Sleep(15 * time.Second)
+
 	for i := 0; i < MAX_WAIT_SECONDS; i++ {
 		partitionMap := getTableSplitMetadata("example", "test_partition1")
 		if len(partitionMap.getHosts(0)) == 0 {
