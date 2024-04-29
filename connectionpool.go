@@ -15,6 +15,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // interface to implement to receive the host information
@@ -250,7 +252,7 @@ func (p *policyConnPool) addHost(host *HostInfo) {
 		p.hostConnPools[hostID] = pool
 	}
 	p.mu.Unlock()
-
+	log.Info().Msgf("creating pool to host %s", host.connectAddress)
 	pool.fill()
 }
 
@@ -478,6 +480,7 @@ func (pool *hostConnPool) logConnectErr(err error) {
 // transition back to a not-filling state.
 func (pool *hostConnPool) fillingStopped(err error) {
 	if err != nil {
+		log.Error().Msgf("gocql: filling stopped %q: %v\n", pool.host.ConnectAddress(), err)
 		if gocqlDebug {
 			pool.logger.Printf("gocql: filling stopped %q: %v\n", pool.host.ConnectAddress(), err)
 		}

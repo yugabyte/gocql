@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 type ExecutableQuery interface {
@@ -63,6 +65,7 @@ func (q *queryExecutor) speculate(ctx context.Context, qry ExecutableQuery, sp S
 func (q *queryExecutor) executeQuery(qry ExecutableQuery) (*Iter, error) {
 	hostIter := q.policy.Pick(qry)
 
+	log.Debug().Msgf("host picked for query %s is %s", qry, hostIter().Info().connectAddress)
 	// check if the query is not marked as idempotent, if
 	// it is, we force the policy to NonSpeculative
 	sp := qry.speculativeExecutionPolicy()

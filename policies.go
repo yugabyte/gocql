@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/hailocab/go-hostpool"
+	"github.com/rs/zerolog/log"
 )
 
 // cowHostList implements a copy on write host list, its equivalent type is []*HostInfo
@@ -735,21 +736,27 @@ func (p *ybPartitionAwareHostPolicy) AddHosts(hosts []*HostInfo) {
 
 func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 	if qry == nil {
+		log.Error().Msg("query is nil, falling to fallback policy")
 		return p.fallback.Pick(qry)
 	}
 
 	routingKey, err := qry.GetRoutingKeyYb()
 	if err != nil {
+		log.Error().Msgf("error in getting routing key, falling to fallback policy; %v", err)
 		return p.fallback.Pick(qry)
 	} else if routingKey == nil {
+		log.Error().Msg("routing key is nil, falling to fallback policy")
 		return p.fallback.Pick(qry)
 	}
 
 	key := GetKey(routingKey)
+	log.Debug().Msgf("routing Key for query %v is %d", qry, key)
 	var replicas []*HostInfo
+	var connectaddressreplicas []net.IP
 
 	keyspacename, tablename := qry.KeyspaceAndTableYb()
 	if keyspacename == "" || tablename == "" {
+		log.Error().Msg("keyspacename or tablename empty in qry, falling to fallback policy")
 		return p.fallback.Pick(qry)
 	}
 
@@ -759,6 +766,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 		p.session.hostSource.getClusterPartitionInfo()
 		tablesplitmetadeta1 := getTableSplitMetadata(keyspacename, tablename)
 		if tablesplitmetadeta1.partitionMap == nil {
+			log.Error().Msgf("could not find tablesplitmetadata for %s.%s , falling to fallback policy", keyspacename, tablename)
 			return p.fallback.Pick(qry)
 		} else {
 			tablesplitmetadeta = tablesplitmetadeta1
@@ -767,6 +775,10 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 
 	start := tablesplitmetadeta.Floor(key)
 	replicas = (tablesplitmetadeta.getHosts(start))
+	for k := 0; k < len(replicas); k++ {
+		connectaddressreplicas = append(connectaddressreplicas, replicas[k].connectAddress)
+	}
+	log.Debug().Msgf("replicas for routing key %d are %v", key, connectaddressreplicas)
 
 	// When the CQL consistency level is set to YB consistent prefix (Cassandra ONE),
 	// the reads would end up going only to the leader if the list of hosts are not shuffled.
@@ -775,6 +787,11 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 		rand.Shuffle(len(replicas), func(a, b int) {
 			replicas[a], replicas[b] = replicas[b], replicas[a]
 		})
+		connectaddressreplicas = connectaddressreplicas[:0]
+		for k := 0; k < len(replicas); k++ {
+			connectaddressreplicas = append(connectaddressreplicas, replicas[k].connectAddress)
+		}
+		log.Debug().Msgf("shuffled replicas for routing key %d are %v", key, connectaddressreplicas)
 	}
 	var (
 		fallbackIter NextHost
@@ -789,11 +806,13 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 			i++
 
 			if !p.fallback.IsLocal(h) && !(qry.GetConsistency().String() == "QUORUM") {
+				log.Debug().Msgf("adding %s to remote hosts list", h.connectAddress)
 				remote = append(remote, h)
 				continue
 			}
 			if h.IsUp() {
 				used[h] = true
+				log.Debug().Msgf("selected host for query %s is %s", qry, h.connectAddress)
 				return (*selectedHost)(h)
 			}
 		}
@@ -805,6 +824,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 
 				if h.IsUp() {
 					used[h] = true
+					log.Debug().Msgf("selected host for query %s is %s", qry, h.connectAddress)
 					return (*selectedHost)(h)
 				}
 			}
@@ -819,6 +839,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 		for fallbackHost := fallbackIter(); fallbackHost != nil; fallbackHost = fallbackIter() {
 			if !used[fallbackHost.Info()] {
 				used[fallbackHost.Info()] = true
+				log.Debug().Msgf("selected host for query %s is %s", qry, fallbackHost.Info().connectAddress)
 				return fallbackHost
 			}
 		}
