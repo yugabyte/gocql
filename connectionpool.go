@@ -480,7 +480,7 @@ func (pool *hostConnPool) logConnectErr(err error) {
 // transition back to a not-filling state.
 func (pool *hostConnPool) fillingStopped(err error) {
 	if err != nil {
-		log.Error().Msgf("gocql: filling stopped %q: %v\n", pool.host.ConnectAddress(), err)
+		log.Error().Msgf("pool filling stopped for %q: %v\n", pool.host.ConnectAddress(), err)
 		if gocqlDebug {
 			pool.logger.Printf("gocql: filling stopped %q: %v\n", pool.host.ConnectAddress(), err)
 		}

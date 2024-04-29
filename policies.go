@@ -1064,6 +1064,7 @@ func roundRobbin(shift int, hosts ...[]*HostInfo) NextHost {
 				h := hosts[currentLayer][(shift+currentlyObserved)%currentLayerSize]
 
 				if h.IsUp() {
+					log.Debug().Msgf("returning host %s from roundRobin", h.connectAddress)
 					return (*selectedHost)(h)
 				}
 
