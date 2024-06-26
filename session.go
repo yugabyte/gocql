@@ -18,6 +18,7 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/rs/zerolog/log"
 	"github.com/yugabyte/gocql/internal/lru"
 )
 
@@ -153,6 +154,7 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 		cfg.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
 	}
 	s.pool = cfg.PoolConfig.buildPool(s)
+	log.Info().Msgf("hostSelectionPolicy: %#v", cfg.PoolConfig.HostSelectionPolicy)
 
 	s.policy = cfg.PoolConfig.HostSelectionPolicy
 	s.policy.Init(s)

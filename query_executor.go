@@ -4,6 +4,8 @@ import (
 	"context"
 	"sync"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 type ExecutableQuery interface {
@@ -67,6 +69,7 @@ func (q *queryExecutor) executeQuery(qry ExecutableQuery) (*Iter, error) {
 	// it is, we force the policy to NonSpeculative
 	sp := qry.speculativeExecutionPolicy()
 	if !qry.IsIdempotent() || sp.Attempts() == 0 {
+		log.Trace().Msgf("Calling do() method")
 		return q.do(qry.Context(), qry, hostIter), nil
 	}
 
@@ -106,6 +109,7 @@ func (q *queryExecutor) executeQuery(qry ExecutableQuery) (*Iter, error) {
 
 func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter NextHost) *Iter {
 	selectedHost := hostIter()
+	log.Debug().Msgf("host picked for query %s is %s", qry, selectedHost.Info().connectAddress)
 	rt := qry.retryPolicy()
 
 	var lastErr error
@@ -120,12 +124,14 @@ func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter Ne
 		pool, ok := q.pool.getPool(host)
 		if !ok {
 			selectedHost = hostIter()
+			log.Debug().Msgf("Did not got pool for %s, trying %s", host.connectAddress, selectedHost.Info().connectAddress)
 			continue
 		}
 
 		conn := pool.Pick()
 		if conn == nil {
 			selectedHost = hostIter()
+			log.Debug().Msgf("Did not got conn from pool of %s, trying %s", host.connectAddress, selectedHost.Info().connectAddress)
 			continue
 		}
 
