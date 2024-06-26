@@ -252,7 +252,7 @@ func (p *policyConnPool) addHost(host *HostInfo) {
 		p.hostConnPools[hostID] = pool
 	}
 	p.mu.Unlock()
-	log.Info().Msgf("creating pool to host %s", host.connectAddress)
+	log.Info().Msgf("filling up pool for host %s", host.connectAddress)
 	pool.fill()
 }
 

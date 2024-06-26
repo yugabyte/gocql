@@ -745,14 +745,13 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 		log.Error().Msgf("error in getting routing key, falling to fallback policy; %v", err)
 		return p.fallback.Pick(qry)
 	} else if routingKey == nil {
-		log.Error().Msg("routing key is nil, falling to fallback policy")
+		log.Debug().Msg("routing key is nil, falling to fallback policy")
 		return p.fallback.Pick(qry)
 	}
 
 	key := GetKey(routingKey)
 	log.Debug().Msgf("routing Key for query %v is %d", qry, key)
 	var replicas []*HostInfo
-	var connectaddressreplicas []net.IP
 
 	keyspacename, tablename := qry.KeyspaceAndTableYb()
 	if keyspacename == "" || tablename == "" {
@@ -775,10 +774,6 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 
 	start := tablesplitmetadeta.Floor(key)
 	replicas = (tablesplitmetadeta.getHosts(start))
-	for k := 0; k < len(replicas); k++ {
-		connectaddressreplicas = append(connectaddressreplicas, replicas[k].connectAddress)
-	}
-	log.Debug().Msgf("replicas for routing key %d are %v", key, connectaddressreplicas)
 
 	// When the CQL consistency level is set to YB consistent prefix (Cassandra ONE),
 	// the reads would end up going only to the leader if the list of hosts are not shuffled.
@@ -787,11 +782,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 		rand.Shuffle(len(replicas), func(a, b int) {
 			replicas[a], replicas[b] = replicas[b], replicas[a]
 		})
-		connectaddressreplicas = connectaddressreplicas[:0]
-		for k := 0; k < len(replicas); k++ {
-			connectaddressreplicas = append(connectaddressreplicas, replicas[k].connectAddress)
-		}
-		log.Debug().Msgf("shuffled replicas for routing key %d are %v", key, connectaddressreplicas)
+		log.Debug().Msgf("First replica after shuffling for routing key %d are %v", key, replicas[0].connectAddress)
 	}
 	var (
 		fallbackIter NextHost
@@ -812,7 +803,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 			}
 			if h.IsUp() {
 				used[h] = true
-				log.Debug().Msgf("selected host for query %s is %s", qry, h.connectAddress)
+				log.Debug().Msgf("selected host for query %s is %s at CL = %s", qry, h.connectAddress, qry.GetConsistency())
 				return (*selectedHost)(h)
 			}
 		}
@@ -824,7 +815,7 @@ func (p *ybPartitionAwareHostPolicy) Pick(qry ExecutableQuery) NextHost {
 
 				if h.IsUp() {
 					used[h] = true
-					log.Debug().Msgf("selected host for query %s is %s", qry, h.connectAddress)
+					log.Debug().Msgf("selected host for query %s is %s, nonLocalReplicasFallback is enabled", qry, h.connectAddress)
 					return (*selectedHost)(h)
 				}
 			}
