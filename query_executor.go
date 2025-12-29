@@ -108,8 +108,8 @@ func (q *queryExecutor) executeQuery(qry ExecutableQuery) (*Iter, error) {
 }
 
 func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter NextHost) *Iter {
+	log.Debug().Msgf("Iterating on a host-list for query %s...", qry)
 	selectedHost := hostIter()
-	log.Debug().Msgf("host picked for query %s is %s", qry, selectedHost.Info().connectAddress)
 	rt := qry.retryPolicy()
 
 	var lastErr error
@@ -118,20 +118,25 @@ func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter Ne
 		host := selectedHost.Info()
 		if host == nil || !host.IsUp() {
 			selectedHost = hostIter()
+                        if host == nil {
+                                log.Debug().Msg("Found a nil host, checking the next host")
+                        } else {
+                                log.Debug().Msgf("Host %s is not up, checking the next host", host.connectAddress)
+                        }
 			continue
 		}
 
 		pool, ok := q.pool.getPool(host)
 		if !ok {
 			selectedHost = hostIter()
-			log.Debug().Msgf("Did not got pool for %s, trying %s", host.connectAddress, selectedHost.Info().connectAddress)
+			log.Debug().Msgf("Did not get a pool for host %s, checking the next host", host.connectAddress)
 			continue
 		}
 
 		conn := pool.Pick()
 		if conn == nil {
 			selectedHost = hostIter()
-			log.Debug().Msgf("Did not got conn from pool of %s, trying %s", host.connectAddress, selectedHost.Info().connectAddress)
+			log.Debug().Msgf("Did not get a conn from pool of host %s, checking the next host", host.connectAddress)
 			continue
 		}
 
@@ -145,6 +150,7 @@ func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter Ne
 			selectedHost.Mark(nil)
 			return iter
 		default:
+                        log.Debug().Msgf("Marking host %s as dead due to %v", selectedHost.Info().connectAddress, iter.err)
 			selectedHost.Mark(iter.err)
 		}
 
@@ -159,11 +165,13 @@ func (q *queryExecutor) do(ctx context.Context, qry ExecutableQuery, hostIter Ne
 		switch rt.GetRetryType(iter.err) {
 		case Retry:
 			// retry on the same host
+                        log.Debug().Msgf("Retrying the query on the same host %s", host.connectAddress)
 			continue
 		case Rethrow, Ignore:
 			return iter
 		case RetryNextHost:
 			// retry on the next host
+                        log.Debug().Msgf("Retrying the query on the next host")
 			selectedHost = hostIter()
 			continue
 		default:
