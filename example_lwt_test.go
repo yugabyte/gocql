@@ -1,10 +1,35 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql_test
 
 import (
 	"context"
 	"fmt"
-	"github.com/yugabyte/gocql"
 	"log"
+
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // ExampleQuery_MapScanCAS demonstrates how to execute a single-statement lightweight transaction.
@@ -25,21 +50,21 @@ func ExampleQuery_MapScanCAS() {
 	ctx := context.Background()
 
 	err = session.Query("INSERT INTO example.my_lwt_table (pk, version, value) VALUES (?, ?, ?)",
-		1, 1, "a").WithContext(ctx).Exec()
+		1, 1, "a").ExecContext(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	m := make(map[string]interface{})
 	applied, err := session.Query("UPDATE example.my_lwt_table SET value = ? WHERE pk = ? IF version = ?",
-		"b", 1, 0).WithContext(ctx).MapScanCAS(m)
+		"b", 1, 0).MapScanCASContext(ctx, m)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(applied, m)
 
 	var value string
-	err = session.Query("SELECT value FROM example.my_lwt_table WHERE pk = ?", 1).WithContext(ctx).
-		Scan(&value)
+	err = session.Query("SELECT value FROM example.my_lwt_table WHERE pk = ?", 1).
+		ScanContext(ctx, &value)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -47,15 +72,15 @@ func ExampleQuery_MapScanCAS() {
 
 	m = make(map[string]interface{})
 	applied, err = session.Query("UPDATE example.my_lwt_table SET value = ? WHERE pk = ? IF version = ?",
-		"b", 1, 1).WithContext(ctx).MapScanCAS(m)
+		"b", 1, 1).MapScanCASContext(ctx, m)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(applied, m)
 
 	var value2 string
-	err = session.Query("SELECT value FROM example.my_lwt_table WHERE pk = ?", 1).WithContext(ctx).
-		Scan(&value2)
+	err = session.Query("SELECT value FROM example.my_lwt_table WHERE pk = ?", 1).
+		ScanContext(ctx, &value2)
 	if err != nil {
 		log.Fatal(err)
 	}

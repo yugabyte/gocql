@@ -1,7 +1,34 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql
 
 import (
+	"fmt"
 	"net"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -15,10 +42,10 @@ type eventDebouncer struct {
 	callback func([]frame)
 	quit     chan struct{}
 
-	logger StdLogger
+	logger StructuredLogger
 }
 
-func newEventDebouncer(name string, eventHandler func([]frame), logger StdLogger) *eventDebouncer {
+func newEventDebouncer(name string, eventHandler func([]frame), logger StructuredLogger) *eventDebouncer {
 	e := &eventDebouncer{
 		name:     name,
 		quit:     make(chan struct{}),
@@ -76,7 +103,8 @@ func (e *eventDebouncer) debounce(frame frame) {
 	if len(e.events) < eventBufferSize {
 		e.events = append(e.events, frame)
 	} else {
-		e.logger.Printf("%s: buffer full, dropping event frame: %s", e.name, frame)
+		e.logger.Warning("Event buffer full, dropping event frame.",
+			NewLogFieldString("event_name", e.name), NewLogFieldStringer("frame", frame))
 	}
 
 	e.mu.Unlock()
@@ -85,50 +113,26 @@ func (e *eventDebouncer) debounce(frame frame) {
 func (s *Session) handleEvent(framer *framer) {
 	frame, err := framer.parseFrame()
 	if err != nil {
-		s.logger.Printf("gocql: unable to parse event frame: %v\n", err)
+		s.logger.Error("Unable to parse event frame.", NewLogFieldError("err", err))
 		return
 	}
 
-	if gocqlDebug {
-		s.logger.Printf("gocql: handling frame: %v\n", frame)
-	}
+	s.logger.Debug("Handling event frame.", NewLogFieldStringer("frame", frame))
 
 	switch f := frame.(type) {
-	case *schemaChangeKeyspace, *schemaChangeFunction,
-		*schemaChangeTable, *schemaChangeAggregate, *schemaChangeType:
-
-		s.schemaEvents.debounce(frame)
+	case *schemaChangeKeyspace, *schemaChangeTable:
+		s.schemaDescriber.debounceRefreshSchemaMetadata()
+		// YugabyteDB: the partition map is keyed by keyspace and table, so it has
+		// to be refreshed whenever a keyspace or table schema change arrives.
+		s.hostSource.getClusterPartitionInfo()
+	case *schemaChangeFunction, *schemaChangeAggregate, *schemaChangeType:
+		s.schemaDescriber.debounceRefreshSchemaMetadata()
 	case *topologyChangeEventFrame, *statusChangeEventFrame:
 		s.nodeEvents.debounce(frame)
 	default:
-		s.logger.Printf("gocql: invalid event frame (%T): %v\n", f, f)
+		s.logger.Error("Invalid event frame.",
+			NewLogFieldString("frame_type", fmt.Sprintf("%T", f)), NewLogFieldStringer("frame", f))
 	}
-}
-
-func (s *Session) handleSchemaEvent(frames []frame) {
-	// TODO: debounce events
-	for _, frame := range frames {
-		switch f := frame.(type) {
-		case *schemaChangeKeyspace:
-			s.schemaDescriber.clearSchema(f.keyspace)
-			s.handleKeyspaceChange(f.keyspace, f.change)
-			s.hostSource.getClusterPartitionInfo()
-		case *schemaChangeTable:
-			s.schemaDescriber.clearSchema(f.keyspace)
-			s.hostSource.getClusterPartitionInfo()
-		case *schemaChangeAggregate:
-			s.schemaDescriber.clearSchema(f.keyspace)
-		case *schemaChangeFunction:
-			s.schemaDescriber.clearSchema(f.keyspace)
-		case *schemaChangeType:
-			s.schemaDescriber.clearSchema(f.keyspace)
-		}
-	}
-}
-
-func (s *Session) handleKeyspaceChange(keyspace, change string) {
-	s.control.awaitSchemaAgreement()
-	s.policy.KeyspaceChanged(KeyspaceUpdateEvent{Keyspace: keyspace, Change: change})
 }
 
 // handleNodeEvent handles inbound status and topology change events.
@@ -156,6 +160,8 @@ func (s *Session) handleNodeEvent(frames []frame) {
 	for _, frame := range frames {
 		switch f := frame.(type) {
 		case *topologyChangeEventFrame:
+			s.logger.Info("Received topology change event.",
+				NewLogFieldString("frame", strings.Join([]string{f.change, "->", f.host.String(), ":", strconv.Itoa(f.port)}, "")))
 			topologyEventReceived = true
 		case *statusChangeEventFrame:
 			event, ok := sEvents[f.host.String()]
@@ -172,18 +178,17 @@ func (s *Session) handleNodeEvent(frames []frame) {
 	}
 
 	for _, f := range sEvents {
-		if gocqlDebug {
-			s.logger.Printf("gocql: dispatching status change event: %+v\n", f)
-		}
+		s.logger.Info("Dispatching status change event.",
+			NewLogFieldString("frame", strings.Join([]string{f.change, "->", f.host.String(), ":", strconv.Itoa(f.port)}, "")))
 
 		// ignore events we received if they were disabled
-		// see https://github.com/gocql/gocql/issues/1591
+		// see https://github.com/apache/cassandra-gocql-driver/issues/1591
 		switch f.change {
-		case "UP":
+		case nodeStateChangeUp:
 			if !s.cfg.Events.DisableNodeStatusEvents {
 				s.handleNodeUp(f.host, f.port)
 			}
-		case "DOWN":
+		case nodeStateChangeDown:
 			if !s.cfg.Events.DisableNodeStatusEvents {
 				s.handleNodeDown(f.host, f.port)
 			}
@@ -192,9 +197,8 @@ func (s *Session) handleNodeEvent(frames []frame) {
 }
 
 func (s *Session) handleNodeUp(eventIp net.IP, eventPort int) {
-	if gocqlDebug {
-		s.logger.Printf("gocql: Session.handleNodeUp: %s:%d\n", eventIp.String(), eventPort)
-	}
+	s.logger.Info("Node is UP.",
+		NewLogFieldStringer("event_ip", eventIp), NewLogFieldInt("event_port", eventPort))
 
 	host, ok := s.ring.getHostByIP(eventIp.String())
 	if !ok {
@@ -219,21 +223,20 @@ func (s *Session) startPoolFill(host *HostInfo) {
 }
 
 func (s *Session) handleNodeConnected(host *HostInfo) {
-	if gocqlDebug {
-		s.logger.Printf("gocql: Session.handleNodeConnected: %s:%d\n", host.ConnectAddress(), host.Port())
-	}
+	s.logger.Debug("Pool connected to node.",
+		NewLogFieldIP("host_addr", host.ConnectAddress()), NewLogFieldInt("port", host.Port()), NewLogFieldString("host_id", host.HostID()))
 
 	host.setState(NodeUp)
 
 	if !s.cfg.filterHost(host) {
 		s.policy.HostUp(host)
+		s.hostListeners.OnHostUp(HostUpEvent{Host: host})
 	}
 }
 
 func (s *Session) handleNodeDown(ip net.IP, port int) {
-	if gocqlDebug {
-		s.logger.Printf("gocql: Session.handleNodeDown: %s:%d\n", ip.String(), port)
-	}
+	s.logger.Warning("Node is DOWN.",
+		NewLogFieldIP("host_addr", ip), NewLogFieldInt("port", port))
 
 	host, ok := s.ring.getHostByIP(ip.String())
 	if ok {
@@ -245,5 +248,11 @@ func (s *Session) handleNodeDown(ip net.IP, port int) {
 		s.policy.HostDown(host)
 		hostID := host.HostID()
 		s.pool.removeHost(hostID)
+		s.hostListeners.OnHostDown(HostDownEvent{Host: host})
 	}
 }
+
+const (
+	nodeStateChangeUp   = "UP"
+	nodeStateChangeDown = "DOWN"
+)

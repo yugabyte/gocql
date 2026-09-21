@@ -1,9 +1,38 @@
+//go:build all || unit
+// +build all unit
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql
 
 import (
 	"fmt"
 	"sort"
 	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 func TestPlacementStrategy_SimpleStrategy(t *testing.T) {
@@ -21,8 +50,8 @@ func TestPlacementStrategy_SimpleStrategy(t *testing.T) {
 
 	hosts := []*HostInfo{host0, host25, host50, host75}
 
-	strat := &simpleStrategy{rf: 2}
-	tokenReplicas := strat.replicaMap(&tokenRing{hosts: hosts, tokens: tokens})
+	strat := newSimpleStrategy(2)
+	tokenReplicas := strat.replicaMap(&tokenRing{hosts: hosts, tokens: tokens}, nopLoggerSingleton)
 	if len(tokenReplicas) != len(tokens) {
 		t.Fatalf("expected replica map to have %d items but has %d", len(tokens), len(tokenReplicas))
 	}
@@ -62,34 +91,28 @@ func TestPlacementStrategy_NetworkStrategy(t *testing.T) {
 	}{
 		{
 			name: "full",
-			strat: &networkTopology{
-				dcs: map[string]int{
-					"dc1": 1,
-					"dc2": 2,
-					"dc3": 3,
-				},
-			},
+			strat: newNetworkTopology(map[string]int{
+				"dc1": 1,
+				"dc2": 2,
+				"dc3": 3,
+			}),
 			expectedReplicaMapSize: hostsPerDC * totalDCs,
 		},
 		{
 			name: "missing",
-			strat: &networkTopology{
-				dcs: map[string]int{
-					"dc2": 2,
-					"dc3": 3,
-				},
-			},
+			strat: newNetworkTopology(map[string]int{
+				"dc2": 2,
+				"dc3": 3,
+			}),
 			expectedReplicaMapSize: hostsPerDC * 2,
 		},
 		{
 			name: "zero",
-			strat: &networkTopology{
-				dcs: map[string]int{
-					"dc1": 0,
-					"dc2": 2,
-					"dc3": 3,
-				},
-			},
+			strat: newNetworkTopology(map[string]int{
+				"dc1": 0,
+				"dc2": 2,
+				"dc3": 3,
+			}),
 			expectedReplicaMapSize: hostsPerDC * 2,
 		},
 	}
@@ -136,7 +159,7 @@ func TestPlacementStrategy_NetworkStrategy(t *testing.T) {
 				expReplicas += rf
 			}
 
-			tokenReplicas := test.strat.replicaMap(&tokenRing{hosts: hosts, tokens: tokens})
+			tokenReplicas := test.strat.replicaMap(&tokenRing{hosts: hosts, tokens: tokens}, nopLoggerSingleton)
 			if len(tokenReplicas) != test.expectedReplicaMapSize {
 				t.Fatalf("expected replica map to have %d items but has %d", test.expectedReplicaMapSize,
 					len(tokenReplicas))
@@ -202,4 +225,34 @@ func TestPlacementStrategy_NetworkStrategy(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Regression test for CASSGO-122:
+// when the token ring only contains hosts from a DC that has RF=0/unspecified for a keyspace,
+// networkTopology.replicaMap should return an empty replica map.
+func TestPlacementStrategy_NetworkStrategy_ReturnEmptyReplicaMapWhenNoReplicasInRing(t *testing.T) {
+	strat := newNetworkTopology(map[string]int{
+		"dc1": 3, // replicated only in dc1
+	})
+
+	// Hosts in ring only from dc2, so no replicas should be returned.
+	// hostId format: dc:rack:host which is used as a token in the token ring.
+	// It makes sense to use the hostId as a token in the token ring because it is unique and deterministic for test purpose.
+	hosts := []*HostInfo{
+		{hostId: "dc2:rack1:0", dataCenter: "dc2", rack: "rack1"},
+		{hostId: "dc2:rack2:1", dataCenter: "dc2", rack: "rack2"},
+		{hostId: "dc2:rack3:2", dataCenter: "dc2", rack: "rack3"},
+	}
+
+	tokens := make([]hostToken, 0, len(hosts))
+	for _, h := range hosts {
+		tokens = append(tokens, hostToken{
+			token: orderedToken(h.hostId),
+			host:  h,
+		})
+	}
+	sort.Sort(&tokenRing{tokens: tokens})
+
+	replicas := strat.replicaMap(&tokenRing{hosts: hosts, tokens: tokens}, nopLoggerSingleton)
+	require.Empty(t, replicas, "expected no replicas, got %d", len(replicas))
 }

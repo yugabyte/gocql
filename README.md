@@ -7,6 +7,10 @@ Documentation: [Getting started guide](https://docs.yugabyte.com/preview/drivers
 
 Discussions: https://www.yugabyte.com/slack
 
+This fork tracks the upstream Apache Cassandra GoCQL driver, currently at
+[v2.1.2](https://github.com/apache/cassandra-gocql-driver). Version `2.0.0` of upstream introduced
+breaking API changes; see the [upgrade guide](UPGRADE_GUIDE.md) for migrating from `1.x`.
+
 Supported Versions
 ------------------
 

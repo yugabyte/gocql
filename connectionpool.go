@@ -1,6 +1,26 @@
-// Copyright (c) 2012 The gocql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2012, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
 
 package gocql
 
@@ -134,7 +154,7 @@ func connConfig(cfg *ClusterConfig) (*ConnConfig, error) {
 		Authenticator:  cfg.Authenticator,
 		AuthProvider:   cfg.AuthProvider,
 		Keepalive:      cfg.SocketKeepalive,
-		Logger:         cfg.logger(),
+		Logger:         cfg.Logger,
 	}, nil
 }
 
@@ -223,6 +243,13 @@ func (p *policyConnPool) getPool(host *HostInfo) (pool *hostConnPool, ok bool) {
 	return
 }
 
+func (p *policyConnPool) getPoolByHostID(hostID string) (pool *hostConnPool, ok bool) {
+	p.mu.RLock()
+	pool, ok = p.hostConnPools[hostID]
+	p.mu.RUnlock()
+	return
+}
+
 func (p *policyConnPool) Close() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -283,7 +310,7 @@ type hostConnPool struct {
 	filling bool
 
 	pos    uint32
-	logger StdLogger
+	logger StructuredLogger
 }
 
 func (h *hostConnPool) String() string {
@@ -466,21 +493,20 @@ func (pool *hostConnPool) logConnectErr(err error) {
 	if opErr, ok := err.(*net.OpError); ok && (opErr.Op == "dial" || opErr.Op == "read") {
 		// connection refused
 		// these are typical during a node outage so avoid log spam.
-		if gocqlDebug {
-			pool.logger.Printf("gocql: unable to dial %q: %v\n", pool.host, err)
-		}
+		pool.logger.Debug("Pool unable to establish a connection to host.",
+			NewLogFieldIP("host_addr", pool.host.ConnectAddress()), NewLogFieldString("host_id", pool.host.HostID()), NewLogFieldError("err", err))
 	} else if err != nil {
 		// unexpected error
-		pool.logger.Printf("error: failed to connect to %q due to error: %v", pool.host, err)
+		pool.logger.Debug("Pool failed to connect to host due to error.",
+			NewLogFieldIP("host_addr", pool.host.ConnectAddress()), NewLogFieldString("host_id", pool.host.HostID()), NewLogFieldError("err", err))
 	}
 }
 
 // transition back to a not-filling state.
 func (pool *hostConnPool) fillingStopped(err error) {
 	if err != nil {
-		if gocqlDebug {
-			pool.logger.Printf("gocql: filling stopped %q: %v\n", pool.host.ConnectAddress(), err)
-		}
+		pool.logger.Warning("Connection pool filling failed.",
+			NewLogFieldIP("host_addr", pool.host.ConnectAddress()), NewLogFieldString("host_id", pool.host.HostID()), NewLogFieldError("err", err))
 		// wait for some time to avoid back-to-back filling
 		// this provides some time between failed attempts
 		// to fill the pool for the host to recover
@@ -495,10 +521,9 @@ func (pool *hostConnPool) fillingStopped(err error) {
 	pool.mu.Unlock()
 
 	// if we errored and the size is now zero, make sure the host is marked as down
-	// see https://github.com/gocql/gocql/issues/1614
-	if gocqlDebug {
-		pool.logger.Printf("gocql: conns of pool after stopped %q: %v\n", host.ConnectAddress(), count)
-	}
+	// see https://github.com/apache/cassandra-gocql-driver/issues/1614
+	pool.logger.Debug("Logging number of connections of pool after filling stopped.",
+		NewLogFieldIP("host_addr", host.ConnectAddress()), NewLogFieldString("host_id", host.HostID()), NewLogFieldInt("count", count))
 	if err != nil && count == 0 {
 		if pool.session.cfg.ConvictionPolicy.AddFailure(err, host) {
 			pool.session.handleNodeDown(host.ConnectAddress(), port)
@@ -554,10 +579,11 @@ func (pool *hostConnPool) connect() (err error) {
 				break
 			}
 		}
-		if gocqlDebug {
-			pool.logger.Printf("gocql: connection failed %q: %v, reconnecting with %T\n",
-				pool.host.ConnectAddress(), err, reconnectionPolicy)
-		}
+		pool.logger.Warning("Pool failed to connect to host. Reconnecting according to the reconnection policy.",
+			NewLogFieldIP("host", pool.host.ConnectAddress()),
+			NewLogFieldString("host_id", pool.host.HostID()),
+			NewLogFieldError("err", err),
+			NewLogFieldString("reconnectionPolicy", fmt.Sprintf("%T", reconnectionPolicy)))
 		time.Sleep(reconnectionPolicy.GetInterval(i))
 	}
 
@@ -604,9 +630,8 @@ func (pool *hostConnPool) HandleError(conn *Conn, err error, closed bool) {
 		return
 	}
 
-	if gocqlDebug {
-		pool.logger.Printf("gocql: pool connection error %q: %v\n", conn.addr, err)
-	}
+	pool.logger.Info("Pool connection error.",
+		NewLogFieldString("addr", conn.addr), NewLogFieldError("err", err))
 
 	// find the connection index
 	for i, candidate := range pool.conns {

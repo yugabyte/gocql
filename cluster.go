@@ -1,6 +1,26 @@
-// Copyright (c) 2012 The gocql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2012, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
 
 package gocql
 
@@ -21,6 +41,44 @@ type PoolConfig struct {
 	// (even if you close the old session before using in a new session).
 	HostSelectionPolicy HostSelectionPolicy
 }
+
+// MetadataCacheMode controls how the driver reads and caches schema metadata from Cassandra system tables.
+// This affects the behavior of Session.KeyspaceMetadata and token-aware host selection policies.
+//
+// See the individual mode constants (Full, KeyspaceOnly, Disabled) for detailed behavior of each mode.
+type MetadataCacheMode int
+
+const (
+	// Full mode reads and caches all schema metadata including keyspaces, tables, columns,
+	// functions, aggregates, user-defined types, and materialized views.
+	//
+	// Token-aware routing works normally (if TokenAwareHostPolicy is used) with full replica information.
+	// Session.KeyspaceMetadata returns cached metadata without querying system tables.
+	//
+	// It enables SchemaChangeListener to be notified about all schema changes.
+	Full MetadataCacheMode = iota
+
+	// KeyspaceOnly mode reads and caches only keyspace metadata (replication strategy and options).
+	// This enables token-aware routing (if TokenAwareHostPolicy is used) without the overhead of caching detailed schema information.
+	//
+	// Token-aware routing works normally (if TokenAwareHostPolicy is used) with full replica information.
+	// Session.KeyspaceMetadata returns cached keyspace metadata, but Tables, Functions, Aggregates,
+	// MaterializedViews, and UserTypes fields will be nil.
+	//
+	// If CacheMode is Full, schema change listeners will be notified about all schema changes.
+	//
+	// Having other then KeyspaceChangeListener of schema events registered will result in an error during session creation.
+	KeyspaceOnly
+
+	// Disabled mode completely disables schema metadata caching.
+	//
+	// Token-aware routing falls back to the configured fallback policy (e.g., RoundRobinHostPolicy,
+	// DCAwareRoundRobinPolicy) since replica information is not available.
+	// Session.KeyspaceMetadata queries system tables on every call instead of using a cache.
+	//
+	// Having schema change listeners will result in an error during session creation.
+	Disabled
+)
 
 func (p PoolConfig) buildPool(session *Session) *policyConnPool {
 	return newPolicyConnPool(session)
@@ -82,7 +140,13 @@ type ClusterConfig struct {
 	// Initial keyspace. Optional.
 	Keyspace string
 
-	// Number of connections per host.
+	// The size of the connection pool for each host.
+	// The pool filling runs in separate gourutine during the session initialization phase.
+	// gocql will always try to get 1 connection on each host pool
+	// during session initialization AND it will attempt
+	// to fill each pool afterward asynchronously if NumConns > 1.
+	// Notice: There is no guarantee that pool filling will be finished in the initialization phase.
+	// Also, it describes a maximum number of connections at the same time.
 	// Default: 2
 	NumConns int
 
@@ -130,7 +194,7 @@ type ClusterConfig struct {
 
 	// Consistency for the serial part of queries, values can be either SERIAL or LOCAL_SERIAL.
 	// Default: unset
-	SerialConsistency SerialConsistency
+	SerialConsistency Consistency
 
 	// SslOpts configures TLS use when HostDialer is not set.
 	// SslOpts is ignored if HostDialer is set.
@@ -172,17 +236,17 @@ type ClusterConfig struct {
 	// If DisableInitialHostLookup then the driver will not attempt to get host info
 	// from the system.peers table, this will mean that the driver will connect to
 	// hosts supplied and will not attempt to lookup the hosts information, this will
-	// mean that data_centre, rack and token information will not be available and as
+	// mean that data_center, rack and token information will not be available and as
 	// such host filtering and token aware query routing will not be available.
 	DisableInitialHostLookup bool
 
 	// Configure events the driver will register for
 	Events struct {
-		// disable registering for status events (node up/down)
+		// Disable registering for status events (host up/down)
 		DisableNodeStatusEvents bool
-		// disable registering for topology events (node added/removed/moved)
+		// Disable registering for topology events (node added/removed/moved)
 		DisableTopologyEvents bool
-		// disable registering for schema events (keyspace/table/function removed/created/updated)
+		// Disable registering for schema events (keyspace/table/function removed/created/updated)
 		DisableSchemaEvents bool
 	}
 
@@ -233,14 +297,43 @@ type ClusterConfig struct {
 	// If not provided, Dialer will be used instead.
 	HostDialer HostDialer
 
-	// Logger for this ClusterConfig.
-	// If not specified, defaults to the global gocql.Logger.
-	Logger StdLogger
+	// StructuredLogger for this ClusterConfig.
+	//
+	// There are 3 built in implementations of StructuredLogger:
+	//  - std library "log" package: gocql.NewLogger
+	//  - zerolog: gocqlzerolog.NewZerologLogger
+	//  - zap: gocqlzap.NewZapLogger
+	//
+	// You can also provide your own logger implementation of the StructuredLogger interface.
+	Logger StructuredLogger
+
+	// Tracer will be used for all queries. Alternatively it can be set of on a
+	// per query basis.
+	// default: nil
+	Tracer Tracer
+
+	// NextPagePrefetch sets the default threshold for pre-fetching new pages. If
+	// there are only p*pageSize rows remaining, the next page will be requested
+	// automatically. This value can also be changed on a per-query basis.
+	// default: 0.25.
+	NextPagePrefetch float64
+
+	// RegisteredTypes will be copied for all sessions created from this Cluster.
+	// If not provided, a copy of GlobalTypes will be used.
+	RegisteredTypes *RegisteredTypes
 
 	// internal config for testing
 	disableControlConn bool
+
+	// Metadata configures driver's internal metadata caching and event listening.
+	Metadata MetadataConfig
 }
 
+// Dialer is the interface that wraps the DialContext method for establishing network connections to Cassandra nodes.
+//
+// This interface allows customization of how gocql establishes TCP connections, which is useful for:
+// connecting through proxies or load balancers, custom TLS configurations, custom timeouts/keep-alive
+// settings, service mesh integration, testing with mocked connections, and corporate network routing.
 type Dialer interface {
 	DialContext(ctx context.Context, network, addr string) (net.Conn, error)
 }
@@ -272,15 +365,19 @@ func NewCluster(hosts ...string) *ClusterConfig {
 		ConvictionPolicy:       &SimpleConvictionPolicy{},
 		ReconnectionPolicy:     &ConstantReconnectionPolicy{MaxRetries: 3, Interval: 1 * time.Second},
 		WriteCoalesceWaitTime:  200 * time.Microsecond,
+		NextPagePrefetch:       0.25,
+		Metadata: MetadataConfig{
+			CacheMode: Full,
+		},
 	}
 	return cfg
 }
 
-func (cfg *ClusterConfig) logger() StdLogger {
-	if cfg.Logger == nil {
-		return Logger
+func (cfg *ClusterConfig) newLogger() StructuredLogger {
+	if cfg.Logger != nil {
+		return cfg.Logger
 	}
-	return cfg.Logger
+	return NewLogger(LogLevelNone)
 }
 
 // CreateSession initializes the cluster based on this config and returns a
@@ -293,14 +390,14 @@ func (cfg *ClusterConfig) CreateSession() (*Session, error) {
 // if defined, to translate the given address and port into a possibly new address
 // and port, If no AddressTranslator or if an error occurs, the given address and
 // port will be returned.
-func (cfg *ClusterConfig) translateAddressPort(addr net.IP, port int) (net.IP, int) {
+func (cfg *ClusterConfig) translateAddressPort(addr net.IP, port int, logger StructuredLogger) (net.IP, int) {
 	if cfg.AddressTranslator == nil || len(addr) == 0 {
 		return addr, port
 	}
 	newAddr, newPort := cfg.AddressTranslator.Translate(addr, port)
-	if gocqlDebug {
-		cfg.logger().Printf("gocql: translating address '%v:%d' to '%v:%d'", addr, port, newAddr, newPort)
-	}
+	logger.Debug("Translating address.",
+		NewLogFieldIP("old_addr", addr), NewLogFieldInt("old_port", port),
+		NewLogFieldIP("new_addr", newAddr), NewLogFieldInt("new_port", newPort))
 	return newAddr, newPort
 }
 
@@ -308,8 +405,64 @@ func (cfg *ClusterConfig) filterHost(host *HostInfo) bool {
 	return !(cfg.HostFilter == nil || cfg.HostFilter.Accept(host))
 }
 
+// MetadataConfig configures driver's internal metadata caching and event listening.
+type MetadataConfig struct {
+	// CacheMode controls how the driver reads and caches schema metadata from Cassandra system tables.
+	//
+	// Also, it affects the behavior of schema change listeners.
+	//
+	// If CacheMode is [KeyspaceOnly], only [KeyspaceChangeListener] will be notified,
+	// having other listeners registered will result in an error during session creation.
+	//
+	// If CacheMode is [Disabled], having these listeners will result in an error during session creation.
+	//
+	// See [MetadataCacheMode] for more details.
+	CacheMode MetadataCacheMode
+
+	// HostListener will be notified when host state and topology changes occur.
+	//
+	// Thread Safety: Topology change callbacks are sequential, but host status callbacks can be concurrent.
+	// If your listener implements both TopologyChangeListener and HostStatusChangeListener, it must be
+	// thread-safe as these event types can run simultaneously from different sources.
+	//
+	// Consider using [HostListenersMux] if you need to register multiple listeners for the same type of host state and topology change.
+	HostListener HostListenersConfig
+
+	// SchemaListener will be notified when schema changes occur.
+	//
+	// Consider using [SchemaListenersMux] if you need to register multiple listeners for the same type of schema change.
+	SchemaListener SchemaListenersConfig
+
+	// SessionReadyListener will be notified when the session is ready to be used.
+	// This is meant to be implemented by Host and Schema listeners but it can also be used as
+	// a generic callback for when the session is ready regardless of whether a metadata listener is implemented or not.
+	//
+	// Consider using [SessionReadyListenersMux] if you need to register multiple listeners for the same session ready event.
+	SessionReadyListener SessionReadyListener
+}
+
+type HostListenersConfig struct {
+	// HostStateChangeListener will be notified about host state events (UP, DOWN).
+	HostStateChangeListener HostStatusChangeListener
+
+	// TopologyChangeListener will be notified about topology change events
+	// (NEW_NODE, REMOVED_NODE).
+	TopologyChangeListener TopologyChangeListener
+}
+
+type SchemaListenersConfig struct {
+	KeyspaceChangeListener  KeyspaceChangeListener
+	TableChangeListener     TableChangeListener
+	UserTypeChangeListener  UserTypeChangeListener
+	FunctionChangeListener  FunctionChangeListener
+	AggregateChangeListener AggregateChangeListener
+}
+
 var (
-	ErrNoHosts              = errors.New("no hosts provided")
+	// ErrNoHosts is returned when no hosts are provided to the cluster configuration.
+	ErrNoHosts = errors.New("no hosts provided")
+	// ErrNoConnectionsStarted is returned when no connections could be established during session creation.
 	ErrNoConnectionsStarted = errors.New("no connections were made when creating the session")
-	ErrHostQueryFailed      = errors.New("unable to populate Hosts")
+	// Deprecated: Never used or returned by the driver.
+	ErrHostQueryFailed = errors.New("unable to populate Hosts")
 )

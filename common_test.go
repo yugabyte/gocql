@@ -1,15 +1,46 @@
+//go:build all || unit || integration || ccm || cassandra
+// +build all unit integration ccm cassandra
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql
 
 import (
 	"flag"
 	"fmt"
 	"log"
+	"math/rand"
 	"net"
 	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/yugabyte/gocql/v2/lz4"
+	"github.com/yugabyte/gocql/v2/snappy"
 )
 
 var (
@@ -22,11 +53,15 @@ var (
 	flagAutoWait     = flag.Duration("autowait", 1000*time.Millisecond, "time to wait for autodiscovery to fill the hosts poll")
 	flagRunSslTest   = flag.Bool("runssl", false, "Set to true to run ssl test")
 	flagRunAuthTest  = flag.Bool("runauth", false, "Set to true to run authentication test")
-	flagCompressTest = flag.String("compressor", "", "compressor to use")
+	flagCompressTest = flag.String("compressor", "no-compression", "compressor to use")
 	flagTimeout      = flag.Duration("gocql.timeout", 5*time.Second, "sets the connection `timeout` for all operations")
 
 	flagCassVersion cassVersion
 )
+
+var seededRand *rand.Rand = rand.New(rand.NewSource(time.Now().UnixNano()))
+
+const randCharset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
 func init() {
 	flag.Var(&flagCassVersion, "gocql.cversion", "the cassandra version being tested against")
@@ -53,7 +88,7 @@ func addSslOptions(cluster *ClusterConfig) *ClusterConfig {
 var initOnce sync.Once
 
 func createTable(s *Session, table string) error {
-	// lets just be really sure
+	// let's just be really sure
 	if err := s.control.awaitSchemaAgreement(); err != nil {
 		log.Printf("error waiting for schema agreement pre create table=%q err=%v\n", table, err)
 		return err
@@ -86,8 +121,10 @@ func createCluster(opts ...func(*ClusterConfig)) *ClusterConfig {
 
 	switch *flagCompressTest {
 	case "snappy":
-		cluster.Compressor = &SnappyCompressor{}
-	case "":
+		cluster.Compressor = &snappy.SnappyCompressor{}
+	case "lz4":
+		cluster.Compressor = &lz4.LZ4Compressor{}
+	case "no-compression":
 	default:
 		panic("invalid compressor: " + *flagCompressTest)
 	}
@@ -102,6 +139,11 @@ func createCluster(opts ...func(*ClusterConfig)) *ClusterConfig {
 }
 
 func createKeyspace(tb testing.TB, cluster *ClusterConfig, keyspace string) {
+	createKeyspaceWithRF(tb, cluster, keyspace, *flagRF)
+}
+
+// createKeyspaceWithRF creates a keyspace with a specific replication factor
+func createKeyspaceWithRF(tb testing.TB, cluster *ClusterConfig, keyspace string, rf int) {
 	// TODO: tb.Helper()
 	c := *cluster
 	c.Keyspace = "system"
@@ -121,7 +163,7 @@ func createKeyspace(tb testing.TB, cluster *ClusterConfig, keyspace string) {
 	WITH replication = {
 		'class' : 'SimpleStrategy',
 		'replication_factor' : %d
-	}`, keyspace, *flagRF))
+	}`, keyspace, rf))
 
 	if err != nil {
 		panic(fmt.Sprintf("unable to create keyspace: %v", err))
@@ -212,7 +254,7 @@ func createFunctions(t *testing.T, session *Session) {
 		CALLED ON NULL INPUT
 		RETURNS double
 		LANGUAGE java AS
-		$$double r = 0; if (state.getInt(0) == 0) return null; r = state.getLong(1); r/= state.getInt(0); return Double.valueOf(r);$$ 
+		$$double r = 0; if (state.getInt(0) == 0) return null; r = state.getLong(1); r/= state.getInt(0); return Double.valueOf(r);$$
 	`).Exec(); err != nil {
 		t.Fatalf("failed to create function with err: %v", err)
 	}
@@ -253,23 +295,31 @@ func assertTrue(t *testing.T, description string, value bool) {
 	}
 }
 
+func randomText(size int) string {
+	result := make([]byte, size)
+	for i := range result {
+		result[i] = randCharset[rand.Intn(len(randCharset))]
+	}
+	return string(result)
+}
+
 func assertEqual(t *testing.T, description string, expected, actual interface{}) {
 	t.Helper()
 	if expected != actual {
-		t.Fatalf("expected %s to be (%+v) but was (%+v) instead", description, expected, actual)
+		t.Fatalf("expected %s to be (%#v) but was (%#v) instead", description, expected, actual)
 	}
 }
 
 func assertDeepEqual(t *testing.T, description string, expected, actual interface{}) {
 	t.Helper()
 	if !reflect.DeepEqual(expected, actual) {
-		t.Fatalf("expected %s to be (%+v) but was (%+v) instead", description, expected, actual)
+		t.Fatalf("expected %s to be (%#v) but was (%#v) instead", description, expected, actual)
 	}
 }
 
 func assertNil(t *testing.T, description string, actual interface{}) {
 	t.Helper()
 	if actual != nil {
-		t.Fatalf("expected %s to be (nil) but was (%+v) instead", description, actual)
+		t.Fatalf("expected %s to be (nil) but was (%#v) instead", description, actual)
 	}
 }
