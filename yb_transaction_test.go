@@ -1,5 +1,5 @@
-//go:build all || cassandra
-// +build all cassandra
+//go:build all || unit
+// +build all unit
 
 package gocql
 

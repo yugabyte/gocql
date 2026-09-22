@@ -100,6 +100,12 @@ func testCluster(proto protoVersion, addresses ...string) *ClusterConfig {
 	cluster := NewCluster(addresses...)
 	cluster.ProtoVersion = int(proto)
 	cluster.disableControlConn = true
+	// gocql-yb: these are upstream protocol tests running against a mock server,
+	// not tests of YugabyteDB routing. Session defaults HostSelectionPolicy to
+	// YBPartitionAwareHostPolicy, whose Pick resolves routing metadata and so
+	// issues an extra PREPARE -- which changes the frames these tests count.
+	// Pin the upstream policy so they observe only the traffic they are asserting on.
+	cluster.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
 	return cluster
 }
 
@@ -980,6 +986,13 @@ func TestWriteCoalescing_WriteAfterClose(t *testing.T) {
 }
 
 func TestSkipMetadata(t *testing.T) {
+	// The YugabyteDB fork forces skipMeta off in Conn.executeQuery, to work around
+	// incorrect PREPARE-response metadata in YCQL
+	// (https://github.com/yugabyte/yugabyte-db/issues/1312), so the driver never
+	// sets flagSkipMetaData and this test's "select nometadata" path is
+	// unreachable. Re-enable together with that workaround.
+	t.Skip("gocql-yb: skipMeta is forced off; see yugabyte-db#1312 workaround in conn.go")
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
