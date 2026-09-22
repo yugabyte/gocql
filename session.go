@@ -2540,6 +2540,19 @@ var (
 // ErrProtocol represents a protocol-level error.
 type ErrProtocol struct{ error }
 
+// Unwrap exposes the wrapped error to errors.Is and errors.As.
+//
+// ErrProtocol embeds the error interface, which promotes only Error() string,
+// so without this method the wrapped cause is unreachable. That matters for
+// protocol negotiation: Conn.exec builds NewErrProtocol("%w", &protocolError{...})
+// to signal that a host rejected the protocol version, and
+// startupCoordinator.checkProtocolRelatedError has to unwrap it to see the
+// errorFrame and its ErrCodeProtocol code. Without unwrapping, the check
+// returns false and controlConn.tryProtocolVersionsForHost aborts instead of
+// stepping down to a version the host supports. YugabyteDB supports protocol
+// versions 3 and 4 only, so every connection attempt failed at version 5.
+func (e ErrProtocol) Unwrap() error { return e.error }
+
 // NewErrProtocol creates a new protocol error with the specified format and arguments.
 func NewErrProtocol(format string, args ...interface{}) error {
 	return ErrProtocol{fmt.Errorf(format, args...)}
