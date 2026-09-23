@@ -120,12 +120,8 @@ func (s *Session) handleEvent(framer *framer) {
 	s.logger.Debug("Handling event frame.", NewLogFieldStringer("frame", frame))
 
 	switch f := frame.(type) {
-	case *schemaChangeKeyspace, *schemaChangeTable:
-		s.schemaDescriber.debounceRefreshSchemaMetadata()
-		// YugabyteDB: the partition map is keyed by keyspace and table, so it has
-		// to be refreshed whenever a keyspace or table schema change arrives.
-		s.hostSource.getClusterPartitionInfo()
-	case *schemaChangeFunction, *schemaChangeAggregate, *schemaChangeType:
+	case *schemaChangeKeyspace, *schemaChangeFunction,
+		*schemaChangeTable, *schemaChangeAggregate, *schemaChangeType:
 		s.schemaDescriber.debounceRefreshSchemaMetadata()
 	case *topologyChangeEventFrame, *statusChangeEventFrame:
 		s.nodeEvents.debounce(frame)
