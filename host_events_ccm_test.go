@@ -47,6 +47,10 @@ func (t *topologyChangeTestListener) OnRemovedHost(event RemovedHostEvent) {
 }
 
 func TestTopologyChangesListener(t *testing.T) {
+	// gocql-yb: CCM (Cassandra Cluster Manager) provisions and controls Apache
+	// Cassandra clusters. This fork targets YugabyteDB, which CCM cannot manage,
+	// so the ccm-tagged tests cannot run meaningfully here.
+	t.Skip("gocql-yb: requires CCM, which manages Apache Cassandra, not YugabyteDB")
 	err := ccm.StartAll()
 	require.NoError(t, err)
 
@@ -167,6 +171,10 @@ func (t *hostStateChangeTestListener) clear() {
 }
 
 func TestHostStateChangesListener(t *testing.T) {
+	// gocql-yb: CCM (Cassandra Cluster Manager) provisions and controls Apache
+	// Cassandra clusters. This fork targets YugabyteDB, which CCM cannot manage,
+	// so the ccm-tagged tests cannot run meaningfully here.
+	t.Skip("gocql-yb: requires CCM, which manages Apache Cassandra, not YugabyteDB")
 	err := ccm.StartAll()
 	require.NoError(t, err)
 
@@ -217,6 +225,10 @@ func TestHostStateChangesListener(t *testing.T) {
 }
 
 func TestHostListenersNeverCalledDuringSessionCreation(t *testing.T) {
+	// gocql-yb: CCM (Cassandra Cluster Manager) provisions and controls Apache
+	// Cassandra clusters. This fork targets YugabyteDB, which CCM cannot manage,
+	// so the ccm-tagged tests cannot run meaningfully here.
+	t.Skip("gocql-yb: requires CCM, which manages Apache Cassandra, not YugabyteDB")
 	err := ccm.StartAll()
 	require.NoError(t, err)
 

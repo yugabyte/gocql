@@ -69,6 +69,7 @@ func (p *position) UnmarshalUDT(name string, info TypeInfo, data []byte) error {
 }
 
 func TestUDT_Marshaler(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -348,6 +349,7 @@ func TestUDT_MissingField(t *testing.T) {
 }
 
 func TestUDT_EmptyCollections(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -400,6 +402,7 @@ func TestUDT_EmptyCollections(t *testing.T) {
 }
 
 func TestUDT_UpdateField(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined types (ALTER TYPE)")
 	session := createSession(t)
 	defer session.Close()
 
@@ -453,6 +456,7 @@ func TestUDT_UpdateField(t *testing.T) {
 }
 
 func TestUDT_ScanNullUDT(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined types")
 	session := createSession(t)
 	defer session.Close()
 

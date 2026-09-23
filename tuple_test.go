@@ -33,6 +33,7 @@ import (
 )
 
 func TestTupleSimple(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -74,6 +75,7 @@ func TestTupleSimple(t *testing.T) {
 }
 
 func TestTuple_NullTuple(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -109,6 +111,7 @@ func TestTuple_NullTuple(t *testing.T) {
 }
 
 func TestTuple_TupleNotSet(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -159,6 +162,7 @@ func TestTuple_TupleNotSet(t *testing.T) {
 }
 
 func TestTupleMapScan(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -189,6 +193,7 @@ func TestTupleMapScan(t *testing.T) {
 }
 
 func TestTupleMapScanNil(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -218,6 +223,7 @@ func TestTupleMapScanNil(t *testing.T) {
 }
 
 func TestTupleMapScanNotSet(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -247,6 +253,7 @@ func TestTupleMapScanNotSet(t *testing.T) {
 }
 
 func TestTupleLastFieldEmpty(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	// Regression test - empty value used to be treated as NULL value in the last tuple field
 	session := createSession(t)
 	defer session.Close()
@@ -284,6 +291,7 @@ func TestTupleLastFieldEmpty(t *testing.T) {
 }
 
 func TestTuple_NestedCollection(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -333,6 +341,7 @@ func TestTuple_NestedCollection(t *testing.T) {
 }
 
 func TestTuple_NullableNestedCollection(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
