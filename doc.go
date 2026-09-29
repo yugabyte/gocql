@@ -206,15 +206,15 @@
 //
 // The driver supports Snappy and LZ4 compression of protocol frames.
 //
-// For Snappy compression (via [github.com/apache/cassandra-gocql-driver/v2/snappy] package):
+// For Snappy compression (via [github.com/yugabyte/gocql/v2/snappy] package):
 //
-//	import "github.com/apache/cassandra-gocql-driver/v2/snappy"
+//	import "github.com/yugabyte/gocql/v2/snappy"
 //
 //	cluster.Compressor = &snappy.SnappyCompressor{}
 //
-// For LZ4 compression (via [github.com/apache/cassandra-gocql-driver/v2/lz4] package):
+// For LZ4 compression (via [github.com/yugabyte/gocql/v2/lz4] package):
 //
-//	import "github.com/apache/cassandra-gocql-driver/v2/lz4"
+//	import "github.com/yugabyte/gocql/v2/lz4"
 //
 //	cluster.Compressor = &lz4.LZ4Compressor{}
 //
@@ -225,16 +225,16 @@
 // The driver provides structured logging through the [StructuredLogger] interface.
 // Built-in integrations are available for popular logging libraries:
 //
-// For Zap logger (via [github.com/apache/cassandra-gocql-driver/v2/gocqlzap] package):
+// For Zap logger (via [github.com/yugabyte/gocql/v2/gocqlzap] package):
 //
-//	import "github.com/apache/cassandra-gocql-driver/v2/gocqlzap"
+//	import "github.com/yugabyte/gocql/v2/gocqlzap"
 //
 //	zapLogger, _ := zap.NewProduction()
 //	cluster.Logger = gocqlzap.NewZapLogger(zapLogger)
 //
-// For Zerolog (via [github.com/apache/cassandra-gocql-driver/v2/gocqlzerolog] package):
+// For Zerolog (via [github.com/yugabyte/gocql/v2/gocqlzerolog] package):
 //
-//	import "github.com/apache/cassandra-gocql-driver/v2/gocqlzerolog"
+//	import "github.com/yugabyte/gocql/v2/gocqlzerolog"
 //
 //	zerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
 //	cluster.Logger = gocqlzerolog.NewZerologLogger(&zerologLogger)
@@ -846,4 +846,4 @@
 // if you need to have multiple listeners for the same event.
 //
 // See [ClusterConfig.Metadata] for more details and Example_eventListeners for a complete implementation example.
-package gocql // import "github.com/apache/cassandra-gocql-driver/v2"
+package gocql // import "github.com/yugabyte/gocql/v2"

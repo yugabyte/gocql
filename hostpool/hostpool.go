@@ -23,7 +23,7 @@ import (
 
 	"github.com/hailocab/go-hostpool"
 
-	gocql "github.com/apache/cassandra-gocql-driver/v2"
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // HostPoolHostPolicy is a host policy which uses the bitly/go-hostpool library

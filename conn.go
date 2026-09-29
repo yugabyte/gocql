@@ -40,8 +40,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/apache/cassandra-gocql-driver/v2/internal/lru"
-	"github.com/apache/cassandra-gocql-driver/v2/internal/streams"
+	"github.com/yugabyte/gocql/v2/internal/lru"
+	"github.com/yugabyte/gocql/v2/internal/streams"
 )
 
 // approve the authenticator with the list of allowed authenticators. If the provided list is empty,
@@ -1644,8 +1644,12 @@ func (c *Conn) executeQuery(ctx context.Context, q *internalQuery) *Iter {
 			}
 		}
 
-		// if the metadata was not present in the response then we should not skip it
-		params.skipMeta = !(c.session.cfg.DisableSkipMetadata || qryOpts.disableSkipMetadata) && info != nil && info.response.flags&flagNoMetaData == 0
+		// YugabyteDB does not support skipping result metadata, so it is always
+		// sent. See https://github.com/YugaByte/yugabyte-db/issues/1312. When that
+		// is fixed, restore the upstream computation:
+		//   params.skipMeta = !(c.session.cfg.DisableSkipMetadata || qryOpts.disableSkipMetadata) &&
+		//       info != nil && info.response.flags&flagNoMetaData == 0
+		params.skipMeta = false
 
 		frame = &writeExecuteFrame{
 			preparedID:       info.id,

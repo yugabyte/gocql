@@ -34,8 +34,8 @@
 // To enable Snappy compression:
 //
 //	import (
-//		"github.com/apache/cassandra-gocql-driver/v2"
-//		"github.com/apache/cassandra-gocql-driver/v2/snappy"
+//		"github.com/yugabyte/gocql/v2"
+//		"github.com/yugabyte/gocql/v2/snappy"
 //	)
 //
 //	cluster := gocql.NewCluster("127.0.0.1")
@@ -72,4 +72,4 @@
 // For performance optimization, benchmark your specific workload with both
 // compression algorithms, though Snappy is mainly useful if benchmarking
 // shows it performs better for your specific use case.
-package snappy // import "github.com/apache/cassandra-gocql-driver/v2/snappy"
+package snappy // import "github.com/yugabyte/gocql/v2/snappy"

@@ -1,26 +1,25 @@
-Apache Cassandra GoCQL Driver
+gocql
 =====
 
-[!Join the chat at https://the-asf.slack.com/archives/C05LPRVNZV1](https://the-asf.slack.com/archives/C05LPRVNZV1)
-![go build](https://github.com/apache/cassandra-gocql-driver/actions/workflows/main.yml/badge.svg)
-[![GoDoc](https://pkg.go.dev/github.com/apache/cassandra-gocql-driver/v2?status.svg)](https://pkg.go.dev/github.com/apache/cassandra-gocql-driver/v2)
+Package gocql implements a fast and robust Cassandra client for the Go programming language. This fork of gocql also supports YugabyteDB's Partition-Aware-Policy.
 
-Package gocql implements a fast and robust Cassandra client for the
-Go programming language.
+Documentation: [Getting started guide](https://docs.yugabyte.com/preview/drivers-orms/go/ycql/)
 
-Project Website: https://cassandra.apache.org<br>
-API documentation: https://pkg.go.dev/github.com/apache/cassandra-gocql-driver/v2<br>
-Discussions: https://cassandra.apache.org/_/community.html#discussions
+Discussions: https://www.yugabyte.com/slack
+
+This fork tracks the upstream Apache Cassandra GoCQL driver, currently at
+[v2.1.2](https://github.com/apache/cassandra-gocql-driver). Version `2.0.0` of upstream introduced
+breaking API changes; see the [upgrade guide](UPGRADE_GUIDE.md) for migrating from `1.x`.
 
 Supported Versions
 ------------------
 
 The following matrix shows the versions of Go and Cassandra that are tested with the integration test suite as part of the CI build:
 
-| Go/Cassandra | 4.1.x | 5.0.x | 
+| Go/Cassandra | 4.0.x | 4.1.x | 
 |--------------|-------|-------|
-| 1.25         | yes   | yes   |
-| 1.26         | yes   | yes   |
+| 1.19         | yes   | yes   |
+| 1.20         | yes   | yes   |   
 
 Gocql has been tested in production against many versions of Cassandra. Due to limits in our CI setup we only
 test against the latest 2 GA releases.
@@ -28,14 +27,26 @@ test against the latest 2 GA releases.
 Sunsetting Model
 ----------------
 
-In general, the Cassandra community will focus on supporting the current and previous versions of Go. gocql may still work with older versions of Go, but official support for these versions will have been sunset.
+In general, the gocql team will focus on supporting the current and previous versions of Go. gocql may still work with older versions of Go, but official support for these versions will have been sunset.
 
 Installation
 ------------
 
-    go get github.com/apache/cassandra-gocql-driver/v2
+    go get github.com/yugabyte/gocql/v2
 
-**Note:** Version `2.0.0` introduces breaking changes. See the [upgrade guide](https://github.com/apache/cassandra-gocql-driver/blob/trunk/UPGRADE_GUIDE.md) for upgrade instructions from `1.x`.
+The import path carries the `/v2` suffix, as Go requires for a module at major
+version 2 or above. Upgrading from `v1.6.0-yb-1` is not a version bump: because
+`github.com/yugabyte/gocql` and `github.com/yugabyte/gocql/v2` are distinct
+modules, `go get -u` will not move you across, and every import of the driver has
+to be updated:
+
+```diff
+-import "github.com/yugabyte/gocql"
++import "github.com/yugabyte/gocql/v2"
+```
+
+Types from the two do not interoperate, so any code with a `*gocql.Session` in
+its signature must be updated in the same change.
 
 
 Features
@@ -55,29 +66,18 @@ Features
   * Each connection can execute up to n concurrent queries (whereby n is the limit set by the protocol version the client chooses to use)
   * Optional automatic discovery of nodes
   * Policy based connection pool with token aware and round-robin policy implementations
-  * Support for host-targeted queries with Query.SetHostID()
 * Support for password authentication
 * Iteration over paged results with configurable page size
 * Support for TLS/SSL
-* Optional frame compression (Snappy and LZ4 available in separate packages)
-* Structured logging support with dedicated packages for popular loggers (Zap, Zerolog)
+* Optional frame compression (using snappy)
 * Automatic query preparation
 * Support for query tracing
-* Support for Cassandra 2.1+ through 5.0+ with native protocol versions 3, 4, and 5:
-  * **Protocol 3** (Cassandra 2.1+):
-    * Support for up to 32768 streams
-    * Support for tuple types
-    * Support for client side timestamps by default
-    * Support for UDTs via a custom marshaller or struct tags
-  * **Protocol 4** (Cassandra 3.0+):
-    * All Protocol 3 features
-    * Enhanced performance and efficiency
-  * **Protocol 5** (Cassandra 4.0+):
-    * All previous protocol features
-    * Support for per-query keyspace override (Query.SetKeyspace(), Batch.SetKeyspace())
-    * Support for per-query custom timestamps (Query.WithNowInSeconds(), Batch.WithNowInSeconds())
-  * **Cassandra 5.0+ specific**:
-    * Support for vector types for vector search capabilities
+* Support for Cassandra 2.1+ [binary protocol version 3](https://github.com/apache/cassandra/blob/trunk/doc/native_protocol_v3.spec)
+  * Support for up to 32768 streams
+  * Support for tuple types
+  * Support for client side timestamps by default
+  * Support for UDTs via a custom marshaller or struct tags
+* Support for Cassandra 3.0+ [binary protocol version 4](https://github.com/apache/cassandra/blob/trunk/doc/native_protocol_v4.spec)
 * An API to access the schema metadata of a given keyspace
 
 Performance
@@ -128,7 +128,73 @@ statement.
 Example
 -------
 
-See [package documentation](https://pkg.go.dev/github.com/apache/cassandra-gocql-driver/v2#pkg-examples).
+```go
+/* Before you execute the program, Launch `cqlsh` and execute:
+create keyspace example with replication = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 };
+create table example.tweet(timeline text, id UUID, text text, PRIMARY KEY(id));
+create index on example.tweet(timeline);
+*/
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/yugabyte/gocql/v2"
+)
+
+func main() {
+	// connect to the cluster
+	cluster := gocql.NewCluster("192.168.1.1", "192.168.1.2", "192.168.1.3")
+	cluster.Keyspace = "example"
+	cluster.Consistency = gocql.Quorum
+	session, _ := cluster.CreateSession()
+	defer session.Close()
+
+	// insert a tweet
+	if err := session.Query(`INSERT INTO tweet (timeline, id, text) VALUES (?, ?, ?)`,
+		"me", gocql.TimeUUID(), "hello world").Exec(); err != nil {
+		log.Fatal(err)
+	}
+
+	var id gocql.UUID
+	var text string
+
+	/* Search for a specific set of records whose 'timeline' column matches
+	 * the value 'me'. The secondary index that we created earlier will be
+	 * used for optimizing the search */
+	if err := session.Query(`SELECT id, text FROM tweet WHERE timeline = ? LIMIT 1`,
+		"me").Consistency(gocql.One).Scan(&id, &text); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Tweet:", id, text)
+
+	// list all tweets
+	iter := session.Query(`SELECT id, text FROM tweet WHERE timeline = ?`, "me").Iter()
+	for iter.Scan(&id, &text) {
+		fmt.Println("Tweet:", id, text)
+	}
+	if err := iter.Close(); err != nil {
+		log.Fatal(err)
+	}
+}
+```
+
+
+Authentication 
+-------
+
+```go
+cluster := gocql.NewCluster("192.168.1.1", "192.168.1.2", "192.168.1.3")
+cluster.Authenticator = gocql.PasswordAuthenticator{
+	Username: "user",
+	Password: "password"
+}
+cluster.Keyspace = "example"
+cluster.Consistency = gocql.Quorum
+session, _ := cluster.CreateSession()
+defer session.Close()
+```
 
 Data Binding
 ------------
@@ -170,3 +236,13 @@ SEO
 ---
 
 For some reason, when you Google `golang cassandra`, this project doesn't feature very highly in the result list. But if you Google `go cassandra`, then we're a bit higher up the list. So this is note to try to convince Google that golang is an alias for Go.
+
+License
+-------
+Copyright 2019, YugaByte, Inc.
+
+Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with the License. You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.

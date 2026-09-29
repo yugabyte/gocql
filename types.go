@@ -206,6 +206,12 @@ func (r *RegisteredTypes) addDefaultTypes() {
 	r.mustRegisterType(TypeVarint, "varint", SimpleCQLType{varintTypeInfo{}})
 	r.mustRegisterAlias("IntegerType", "varint")
 
+	// YugabyteDB-specific: jsonb is carried as a UTF-8 string, so it reuses the
+	// varchar codec.
+	r.mustRegisterType(TypeJsonb, "jsonb", SimpleCQLType{varcharLikeTypeInfo{
+		typ: TypeJsonb,
+	}})
+
 	// these types need references to the registered types
 	r.mustRegisterType(TypeList, "list", listSetCQLType{
 		typ:   TypeList,
@@ -656,6 +662,9 @@ const (
 	TypeSet       Type = 0x0022
 	TypeUDT       Type = 0x0030
 	TypeTuple     Type = 0x0031
+	// TypeJsonb is a YugabyteDB-specific type; it is not part of the CQL
+	// native protocol spec and is encoded on the wire exactly like varchar.
+	TypeJsonb Type = 0x0080
 )
 
 // NewNativeType returns a TypeInfo from the global registered types.

@@ -29,7 +29,7 @@ import (
 	"fmt"
 	"log"
 
-	gocql "github.com/apache/cassandra-gocql-driver/v2"
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // Example_batch demonstrates how to execute a batch of statements.

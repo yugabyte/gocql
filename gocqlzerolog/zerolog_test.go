@@ -28,7 +28,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	gocql "github.com/apache/cassandra-gocql-driver/v2"
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 const logLineEnding = "%%%\n%%%"

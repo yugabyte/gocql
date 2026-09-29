@@ -27,13 +27,13 @@ package gocql
 import "runtime/debug"
 
 const (
-	defaultDriverName = "github.com/apache/cassandra-gocql-driver"
+	defaultDriverName = "github.com/yugabyte/gocql"
 
 	// This string MUST have this value since we explicitly test against the
 	// current main package returned by runtime/debug below.  Also note the
 	// package name used here may change in a future (2.x) release; in that case
 	// this constant will be updated as well.
-	mainPackage = "github.com/apache/cassandra-gocql-driver/v2"
+	mainPackage = "github.com/yugabyte/gocql/v2"
 )
 
 // driverName contains the name of the gocql driver.

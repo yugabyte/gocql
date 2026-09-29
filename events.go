@@ -151,6 +151,7 @@ func (s *Session) handleNodeEvent(frames []frame) {
 	topologyEventReceived := false
 	// status change events
 	sEvents := make(map[string]*nodeEvent)
+	s.hostSource.getClusterPartitionInfo()
 
 	for _, frame := range frames {
 		switch f := frame.(type) {

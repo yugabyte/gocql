@@ -21,7 +21,7 @@ package gocqlzap
 import (
 	"go.uber.org/zap"
 
-	gocql "github.com/apache/cassandra-gocql-driver/v2"
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // DefaultName is the default logger name used when creating a new zap logger.

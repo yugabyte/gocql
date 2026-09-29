@@ -2664,7 +2664,6 @@ func assertFunctionMetadata(t *testing.T, functions []FunctionMetadata, err erro
 	avgState := functions[1]
 	avgFinal := functions[0]
 
-	avgStateBody := "if (val !=null) {state.setInt(0, state.getInt(0)+1); state.setLong(1, state.getLong(1)+val.intValue());}return state;"
 	expectedAvgState := FunctionMetadata{
 		Keyspace: "gocql_test",
 		Name:     "avgstate",
@@ -2692,13 +2691,11 @@ func assertFunctionMetadata(t *testing.T, functions []FunctionMetadata, err erro
 		returnTypeRaw:     "frozen<tuple<int, bigint>>",
 		CalledOnNullInput: true,
 		Language:          "java",
-		Body:              avgStateBody,
 	}
 	if !reflect.DeepEqual(avgState, expectedAvgState) {
 		t.Fatalf("function is %+v, but expected %+v", avgState, expectedAvgState)
 	}
 
-	finalStateBody := "double r = 0; if (state.getInt(0) == 0) return null; r = state.getLong(1); r/= state.getInt(0); return Double.valueOf(r);"
 	expectedAvgFinal := FunctionMetadata{
 		Keyspace: "gocql_test",
 		Name:     "avgfinal",
@@ -2718,7 +2715,6 @@ func assertFunctionMetadata(t *testing.T, functions []FunctionMetadata, err erro
 		returnTypeRaw:     "double",
 		CalledOnNullInput: true,
 		Language:          "java",
-		Body:              finalStateBody,
 	}
 	if !reflect.DeepEqual(avgFinal, expectedAvgFinal) {
 		t.Fatalf("function is %#v, but expected %#v", avgFinal, expectedAvgFinal)

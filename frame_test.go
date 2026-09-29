@@ -30,12 +30,13 @@ package gocql
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"reflect"
 	"testing"
 
-	"github.com/apache/cassandra-gocql-driver/v2/lz4"
-	"github.com/apache/cassandra-gocql-driver/v2/snappy"
+	"github.com/yugabyte/gocql/v2/lz4"
+	"github.com/yugabyte/gocql/v2/snappy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -906,6 +907,14 @@ func newErrorFrameForTest(code int, msg string) *framer {
 	return f
 }
 
+// ybErrorString builds the error string that this fork's errorFrame.Error()
+// produces. YugabyteDB gocql prefixes the CQL error code to the message (see
+// errorFrame.Error in errors.go), so the upstream expectations of a bare message
+// do not hold here.
+func ybErrorString(code int, msg string) string {
+	return fmt.Sprintf("code=%x; message=%s", code, msg)
+}
+
 func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -928,8 +937,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "coordinator overloaded" {
 					t.Fatalf("expected message %q, got %q", "coordinator overloaded", reqErr.Message())
 				}
-				if reqErr.Error() != "coordinator overloaded" {
-					t.Fatalf("expected error string %q, got %q", "coordinator overloaded", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "coordinator overloaded"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
@@ -951,8 +960,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "node is bootstrapping" {
 					t.Fatalf("expected message %q, got %q", "node is bootstrapping", reqErr.Message())
 				}
-				if reqErr.Error() != "node is bootstrapping" {
-					t.Fatalf("expected error string %q, got %q", "node is bootstrapping", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "node is bootstrapping"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
@@ -974,8 +983,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "invalid query" {
 					t.Fatalf("expected message %q, got %q", "invalid query", reqErr.Message())
 				}
-				if reqErr.Error() != "invalid query" {
-					t.Fatalf("expected error string %q, got %q", "invalid query", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "invalid query"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
@@ -997,8 +1006,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "configuration error" {
 					t.Fatalf("expected message %q, got %q", "configuration error", reqErr.Message())
 				}
-				if reqErr.Error() != "configuration error" {
-					t.Fatalf("expected error string %q, got %q", "configuration error", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "configuration error"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
@@ -1020,8 +1029,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "bad credentials" {
 					t.Fatalf("expected message %q, got %q", "bad credentials", reqErr.Message())
 				}
-				if reqErr.Error() != "bad credentials" {
-					t.Fatalf("expected error string %q, got %q", "bad credentials", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "bad credentials"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
@@ -1043,8 +1052,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "syntax error" {
 					t.Fatalf("expected message %q, got %q", "syntax error", reqErr.Message())
 				}
-				if reqErr.Error() != "syntax error" {
-					t.Fatalf("expected error string %q, got %q", "syntax error", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "syntax error"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
@@ -1066,8 +1075,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "truncation error" {
 					t.Fatalf("expected message %q, got %q", "truncation error", reqErr.Message())
 				}
-				if reqErr.Error() != "truncation error" {
-					t.Fatalf("expected error string %q, got %q", "truncation error", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "truncation error"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
@@ -1089,8 +1098,8 @@ func TestParseErrorFrameDedicatedTypes(t *testing.T) {
 				if reqErr.Message() != "unauthorized" {
 					t.Fatalf("expected message %q, got %q", "unauthorized", reqErr.Message())
 				}
-				if reqErr.Error() != "unauthorized" {
-					t.Fatalf("expected error string %q, got %q", "unauthorized", reqErr.Error())
+				if want := ybErrorString(reqErr.Code(), "unauthorized"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
 				}
 				if reqErr.Header().op != opError {
 					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)

@@ -38,7 +38,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/apache/cassandra-gocql-driver/v2/internal/lru"
+	"github.com/yugabyte/gocql/v2/internal/lru"
 )
 
 // Session is the interface used by users to interact with the database.
@@ -171,6 +171,11 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	}
 
 	s.schemaDescriber = newSchemaDescriber(s, newRefreshDebouncer(schemaRefreshDebounceTime, func() error {
+		// A schema change can create, split or move tablets, so the YugabyteDB
+		// partition map is refreshed with the schema metadata. This runs on the
+		// debounced path, as it did in 1.x, so the refresh happens after the
+		// cluster has settled rather than on the raw event.
+		defer s.hostSource.getClusterPartitionInfo()
 		return refreshSchemas(s)
 	}))
 
@@ -223,7 +228,8 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 	s.connCfg = connCfg
 
 	if cfg.PoolConfig.HostSelectionPolicy == nil {
-		cfg.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
+		// YugabyteDB default: route by partition, falling back to round robin.
+		cfg.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
 	}
 	s.pool = cfg.PoolConfig.buildPool(s)
 	s.policy = cfg.PoolConfig.HostSelectionPolicy
@@ -392,9 +398,9 @@ func (s *Session) init() error {
 		newer, _ := checkSystemSchema(s.control)
 		s.useSystemSchema = newer
 	} else {
-		version := s.ring.rrHost().Version()
-		s.useSystemSchema = version.AtLeast(3, 0, 0)
-		s.hasAggregatesAndFunctions = version.AtLeast(2, 2, 0)
+		// YugaByte YCQL version is 3.9. Do not check host for min version.
+		s.useSystemSchema = true
+		s.hasAggregatesAndFunctions = true
 	}
 
 	if s.pool.Size() == 0 {
@@ -1264,13 +1270,13 @@ func shouldPrepare(s string) bool {
 	if n := strings.IndexFunc(stmt, unicode.IsSpace); n >= 0 {
 		stmtType = strings.ToLower(stmt[:n])
 	}
-	if stmtType == "begin" {
+	if stmtType == "begin" || stmtType == "start" {
 		if n := strings.LastIndexFunc(stmt, unicode.IsSpace); n >= 0 {
 			stmtType = strings.ToLower(stmt[n+1:])
 		}
 	}
 	switch stmtType {
-	case "select", "insert", "update", "delete", "batch":
+	case "select", "insert", "update", "delete", "batch", "transaction", "commit":
 		return true
 	}
 	return false
@@ -2220,6 +2226,43 @@ func createRoutingKey(meta *StatementMetadata, values []interface{}) ([]byte, er
 	return buf.Bytes(), nil
 }
 
+// createRoutingKeyYb builds a YugabyteDB routing key. It differs from
+// createRoutingKey in two ways: values are marshalled with MarshalYb (which
+// uses microsecond timestamps), and a composite key is a plain concatenation
+// of the encoded values rather than Cassandra's length-prefixed form, because
+// that is what YugabyteDB's partition hash is computed over.
+func createRoutingKeyYb(meta *StatementMetadata, values []interface{}) ([]byte, error) {
+	if meta == nil || len(meta.PKBindColumnIndexes) == 0 {
+		return nil, nil
+	}
+
+	if len(values) != len(meta.BindColumns) {
+		return nil, errors.New("gocql: number of values does not match the number of bind columns")
+	}
+
+	if len(meta.PKBindColumnIndexes) == 1 {
+		// single column routing key
+		return MarshalYb(
+			meta.BindColumns[meta.PKBindColumnIndexes[0]].TypeInfo,
+			values[meta.PKBindColumnIndexes[0]],
+		)
+	}
+
+	// composite routing key
+	buf := bytes.NewBuffer(make([]byte, 0, 256))
+	for i := range meta.PKBindColumnIndexes {
+		encoded, err := MarshalYb(
+			meta.BindColumns[meta.PKBindColumnIndexes[i]].TypeInfo,
+			values[meta.PKBindColumnIndexes[i]],
+		)
+		if err != nil {
+			return nil, err
+		}
+		buf.Write(encoded)
+	}
+	return buf.Bytes(), nil
+}
+
 // SetKeyspace will enable keyspace flag on the query.
 // It allows to specify the keyspace that the query should be executed in
 //
@@ -2486,7 +2529,7 @@ var (
 	ErrUnavailable          = errors.New("unavailable")
 	ErrUnsupported          = errors.New("feature not supported")
 	ErrTooManyStmts         = errors.New("too many statements")
-	ErrUseStmt              = errors.New("use statements aren't supported. Please see https://github.com/apache/cassandra-gocql-driver for explanation.")
+	ErrUseStmt              = errors.New("use statements aren't supported. Please see https://github.com/yugabyte/gocql for explanation.")
 	ErrSessionClosed        = errors.New("session has been closed")
 	ErrNoConnections        = errors.New("gocql: no hosts available in the pool")
 	ErrNoKeyspace           = errors.New("no keyspace provided")
@@ -2496,6 +2539,19 @@ var (
 
 // ErrProtocol represents a protocol-level error.
 type ErrProtocol struct{ error }
+
+// Unwrap exposes the wrapped error to errors.Is and errors.As.
+//
+// ErrProtocol embeds the error interface, which promotes only Error() string,
+// so without this method the wrapped cause is unreachable. That matters for
+// protocol negotiation: Conn.exec builds NewErrProtocol("%w", &protocolError{...})
+// to signal that a host rejected the protocol version, and
+// startupCoordinator.checkProtocolRelatedError has to unwrap it to see the
+// errorFrame and its ErrCodeProtocol code. Without unwrapping, the check
+// returns false and controlConn.tryProtocolVersionsForHost aborts instead of
+// stepping down to a version the host supports. YugabyteDB supports protocol
+// versions 3 and 4 only, so every connection attempt failed at version 5.
+func (e ErrProtocol) Unwrap() error { return e.error }
 
 // NewErrProtocol creates a new protocol error with the specified format and arguments.
 func NewErrProtocol(format string, args ...interface{}) error {

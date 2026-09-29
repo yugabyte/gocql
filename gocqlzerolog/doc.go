@@ -32,8 +32,8 @@
 //	import (
 //		"os"
 //		"github.com/rs/zerolog"
-//		"github.com/apache/cassandra-gocql-driver/v2"
-//		"github.com/apache/cassandra-gocql-driver/v2/gocqlzerolog"
+//		"github.com/yugabyte/gocql/v2"
+//		"github.com/yugabyte/gocql/v2/gocqlzerolog"
 //	)
 //
 //	zerologLogger := zerolog.New(os.Stdout).With().Timestamp().Logger()
@@ -92,8 +92,8 @@
 //	import (
 //		"os"
 //		"github.com/rs/zerolog"
-//		"github.com/apache/cassandra-gocql-driver/v2"
-//		"github.com/apache/cassandra-gocql-driver/v2/gocqlzerolog"
+//		"github.com/yugabyte/gocql/v2"
+//		"github.com/yugabyte/gocql/v2/gocqlzerolog"
 //	)
 //
 //	// Basic structured logging (JSON output)
@@ -127,4 +127,4 @@
 //
 // The logger implementation is thread-safe and can be used concurrently
 // across multiple goroutines, as guaranteed by the underlying Zerolog logger.
-package gocqlzerolog // import "github.com/apache/cassandra-gocql-driver/v2/gocqlzerolog"
+package gocqlzerolog // import "github.com/yugabyte/gocql/v2/gocqlzerolog"

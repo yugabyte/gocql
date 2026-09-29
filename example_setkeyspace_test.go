@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"log"
 
-	gocql "github.com/apache/cassandra-gocql-driver/v2"
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // Example_setKeyspace demonstrates the SetKeyspace method that allows

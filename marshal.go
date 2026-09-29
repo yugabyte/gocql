@@ -89,6 +89,29 @@ func Marshal(info TypeInfo, value interface{}) ([]byte, error) {
 	return info.Marshal(value)
 }
 
+// MarshalYb is the YugabyteDB variant of Marshal, used when building routing
+// keys for the partition-aware host policy. It differs from Marshal in one
+// respect: YugabyteDB encodes CQL timestamps in its partition hash with
+// microsecond precision, whereas Cassandra uses milliseconds. Every other type
+// is delegated to the standard marshaller.
+func MarshalYb(info TypeInfo, value interface{}) ([]byte, error) {
+	if info.Type() != TypeTimestamp {
+		return Marshal(info, value)
+	}
+
+	if valueRef := reflect.ValueOf(value); valueRef.Kind() == reflect.Ptr {
+		if valueRef.IsNil() {
+			return nil, nil
+		} else if v, ok := value.(Marshaler); ok {
+			return v.MarshalCQL(info)
+		} else {
+			return MarshalYb(info, valueRef.Elem().Interface())
+		}
+	}
+
+	return marshalTimestampYb(info, value)
+}
+
 // Unmarshal parses the CQL encoded data based on the info parameter that
 // describes the Cassandra internal data type and stores the result in the
 // value pointed by value.
@@ -1389,6 +1412,35 @@ func (timestampTypeInfo) Marshal(value interface{}) ([]byte, error) {
 		return encBigInt(rv.Int()), nil
 	}
 	return nil, marshalErrorf("can not marshal %T into timestamp. Accepted types: int64, time.Time, UnsetValue.", value)
+}
+
+func marshalTimestampYb(info TypeInfo, value interface{}) ([]byte, error) {
+	switch v := value.(type) {
+	case Marshaler:
+		return v.MarshalCQL(info)
+	case unsetColumn:
+		return nil, nil
+	case int64:
+		return encBigInt(v), nil
+	case time.Time:
+		if v.IsZero() {
+			return []byte{}, nil
+		}
+		x := int64(v.UTC().Unix()*1e3) + int64(v.UTC().Nanosecond()/1e6)
+		// Multiply the timestamp's int64 value by 1000 to adjust the precision.
+		return encBigInt(x * 1000), nil
+	}
+
+	if value == nil {
+		return nil, nil
+	}
+
+	rv := reflect.ValueOf(value)
+	switch rv.Type().Kind() {
+	case reflect.Int64:
+		return encBigInt(rv.Int()), nil
+	}
+	return nil, marshalErrorf("can not marshal %T into %s", value, info)
 }
 
 // Unmarshal unmarshals the byte slice into the value.

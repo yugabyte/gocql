@@ -182,3 +182,8 @@ Dmitry Kropachev <dmitry.kropachev@gmail.com>
 Oliver Boyle <pleasedontspamme4321+gocql@gmail.com> *
 Jackson Fleming <jackson.fleming@instaclustr.com> *
 Sylwia Szunejko <sylwia.szunejko@scylladb.com> *
+
+
+This distribution is the YugabyteDB fork of the above project
+( https://github.com/yugabyte/gocql ). Modifications Copyright 2019-2026,
+Yugabyte, Inc., licensed under the Apache License, Version 2.0.

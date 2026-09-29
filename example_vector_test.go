@@ -23,7 +23,7 @@ import (
 	"fmt"
 	"log"
 
-	gocql "github.com/apache/cassandra-gocql-driver/v2"
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // Example_vector demonstrates how to work with vector search in Cassandra 5.0+.

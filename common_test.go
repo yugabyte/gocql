@@ -39,8 +39,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/cassandra-gocql-driver/v2/lz4"
-	"github.com/apache/cassandra-gocql-driver/v2/snappy"
+	"github.com/yugabyte/gocql/v2/lz4"
+	"github.com/yugabyte/gocql/v2/snappy"
 )
 
 var (

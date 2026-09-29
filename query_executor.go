@@ -40,7 +40,10 @@ type ExecutableQuery = ExecutableStatement
 // exposes the correct functions for the HostSelectionPolicy to operate correctly.
 type ExecutableStatement interface {
 	GetRoutingKey() ([]byte, error)
+	GetRoutingKeyYb() ([]byte, error)
+	GetConsistency() Consistency
 	Keyspace() string
+	KeyspaceAndTableYb() (string, string)
 	Table() string
 	IsIdempotent() bool
 	GetHostID() string
@@ -462,6 +465,44 @@ func (q *internalQuery) Table() string {
 	return q.routingInfo.getTable()
 }
 
+// KeyspaceAndTableYb returns the keyspace and table this query targets, as
+// needed by the YugabyteDB partition-aware host policy. It returns two empty
+// strings when they cannot be determined.
+func (q *internalQuery) KeyspaceAndTableYb() (string, string) {
+	if q.session == nil {
+		return "", ""
+	}
+
+	meta, err := q.session.routingStatementMetadata(q.Context(), q.qryOpts.stmt, q.qryOpts.keyspace)
+	if err != nil || meta == nil {
+		return "", ""
+	}
+	if meta.Keyspace == "" || meta.Table == "" {
+		return "", ""
+	}
+	return meta.Keyspace, meta.Table
+}
+
+// GetRoutingKeyYb is GetRoutingKey using YugabyteDB's routing key encoding.
+func (q *internalQuery) GetRoutingKeyYb() ([]byte, error) {
+	if q.qryOpts.routingKey != nil {
+		return q.qryOpts.routingKey, nil
+	}
+
+	if q.qryOpts.binding != nil && len(q.qryOpts.values) == 0 {
+		// If this query was created using session.Bind we wont have the query
+		// values yet, so we have to pass down to the next policy.
+		return nil, nil
+	}
+
+	meta, err := q.session.routingStatementMetadata(q.Context(), q.qryOpts.stmt, q.qryOpts.keyspace)
+	if err != nil {
+		return nil, err
+	}
+
+	return createRoutingKeyYb(meta, q.qryOpts.values)
+}
+
 func (q *internalQuery) IsIdempotent() bool {
 	return q.qryOpts.idempotent
 }
@@ -562,6 +603,11 @@ type internalBatch struct {
 	session            *Session
 	metrics            *queryMetrics
 	hostMetricsManager hostMetricsManager
+
+	// firstBoundStmtIdxYB records which statement in the batch produced the
+	// YugabyteDB routing key, so KeyspaceAndTableYb reports the same statement.
+	// -1 means no statement yielded a routing key.
+	firstBoundStmtIdxYB int
 }
 
 func newInternalBatch(batch *Batch, ctx context.Context) *internalBatch {
@@ -572,13 +618,14 @@ func newInternalBatch(batch *Batch, ctx context.Context) *internalBatch {
 		hostMetricsMgr = emptyHostMetricsManager
 	}
 	return &internalBatch{
-		originalBatch:      batch,
-		batchOpts:          newBatchOptions(batch, ctx),
-		routingInfo:        &queryRoutingInfo{},
-		session:            batch.session,
-		consistency:        uint32(batch.GetConsistency()),
-		metrics:            &queryMetrics{},
-		hostMetricsManager: hostMetricsMgr,
+		originalBatch:       batch,
+		batchOpts:           newBatchOptions(batch, ctx),
+		routingInfo:         &queryRoutingInfo{},
+		session:             batch.session,
+		firstBoundStmtIdxYB: -1,
+		consistency:         uint32(batch.GetConsistency()),
+		metrics:             &queryMetrics{},
+		hostMetricsManager:  hostMetricsMgr,
 	}
 }
 
@@ -664,6 +711,64 @@ func (b *internalBatch) Keyspace() string {
 
 func (b *internalBatch) Table() string {
 	return b.routingInfo.getTable()
+}
+
+// KeyspaceAndTableYb returns the keyspace and table targeted by the batch
+// statement that produced the routing key, for the YugabyteDB partition-aware
+// host policy. GetRoutingKeyYb must have run first.
+func (b *internalBatch) KeyspaceAndTableYb() (string, string) {
+	if b.session == nil || b.firstBoundStmtIdxYB < 0 {
+		return "", ""
+	}
+	if b.firstBoundStmtIdxYB >= len(b.batchOpts.entries) {
+		return "", ""
+	}
+
+	entry := b.batchOpts.entries[b.firstBoundStmtIdxYB]
+	meta, err := b.session.routingStatementMetadata(b.Context(), entry.Stmt, b.batchOpts.keyspace)
+	if err != nil || meta == nil {
+		return "", ""
+	}
+	if meta.Keyspace == "" || meta.Table == "" {
+		return "", ""
+	}
+	return meta.Keyspace, meta.Table
+}
+
+// GetRoutingKeyYb is GetRoutingKey using YugabyteDB's routing key encoding. It
+// scans the batch for the first statement that yields a routing key, because a
+// batch may mix bound and unbound statements.
+func (b *internalBatch) GetRoutingKeyYb() ([]byte, error) {
+	if b.batchOpts.routingKey != nil {
+		return b.batchOpts.routingKey, nil
+	}
+
+	b.firstBoundStmtIdxYB = -1
+	if len(b.batchOpts.entries) == 0 {
+		return nil, nil
+	}
+
+	for i, entry := range b.batchOpts.entries {
+		if entry.binding != nil {
+			// bindings do not have the values, skip them like Query does.
+			continue
+		}
+
+		meta, err := b.session.routingStatementMetadata(b.Context(), entry.Stmt, b.batchOpts.keyspace)
+		if err != nil || meta == nil {
+			continue
+		}
+
+		result, err := createRoutingKeyYb(meta, entry.Args)
+		if err != nil || result == nil {
+			continue
+		}
+
+		b.firstBoundStmtIdxYB = i
+		return result, nil
+	}
+
+	return nil, nil
 }
 
 func (b *internalBatch) IsIdempotent() bool {

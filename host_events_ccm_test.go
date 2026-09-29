@@ -29,7 +29,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/apache/cassandra-gocql-driver/v2/internal/ccm"
+	"github.com/yugabyte/gocql/v2/internal/ccm"
 	"github.com/stretchr/testify/require"
 )
 

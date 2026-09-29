@@ -233,10 +233,12 @@ func (c *ColumnMetadata) Clone() *ColumnMetadata {
 
 // FunctionMetadata holds metadata for function constructs
 type FunctionMetadata struct {
-	Keyspace          string
-	Name              string
-	ArgumentTypes     []TypeInfo
-	ArgumentNames     []string
+	Keyspace      string
+	Name          string
+	ArgumentTypes []TypeInfo
+	ArgumentNames []string
+	// Body is always empty on this fork: YugabyteDB's system_schema.functions
+	// has no `body` column, so there is nothing to populate it from.
 	Body              string
 	CalledOnNullInput bool
 	Language          string
@@ -1968,13 +1970,13 @@ func getFunctionsMetadata(session *Session, keyspaceName string) ([]FunctionMeta
 	} else {
 		tableName = "system.schema_functions"
 	}
+	// `body` is omitted: YugabyteDB's system_schema.functions has no such column.
 	stmt := fmt.Sprintf(`
 		SELECT
 		    keyspace_name,
 			function_name,
 			argument_types,
 			argument_names,
-			body,
 			called_on_null_input,
 			language,
 			return_type
@@ -2001,13 +2003,13 @@ func getAllFunctionsMetadata(session *Session) (map[string][]FunctionMetadata, e
 	} else {
 		tableName = "system.schema_functions"
 	}
+	// `body` is omitted: YugabyteDB's system_schema.functions has no such column.
 	stmt := fmt.Sprintf(`
 		SELECT
 		    keyspace_name,
 			function_name,
 			argument_types,
 			argument_names,
-			body,
 			called_on_null_input,
 			language,
 			return_type
@@ -2032,7 +2034,6 @@ func getFunctionsMetadataFromIter(session *Session, iter *Iter) (map[string][]Fu
 			&function.Name,
 			&function.argumentTypesRaw,
 			&function.ArgumentNames,
-			&function.Body,
 			&function.CalledOnNullInput,
 			&function.Language,
 			&function.returnTypeRaw,
@@ -2074,6 +2075,8 @@ func getAggregatesMetadata(session *Session, keyspaceName string) ([]AggregateMe
 		tableName = "system.schema_aggregates"
 	}
 
+	// `return_type` is omitted: YugabyteDB's system_schema.aggregates has no
+	// such column.
 	stmt := fmt.Sprintf(`
 		SELECT
 			keyspace_name,
@@ -2081,7 +2084,6 @@ func getAggregatesMetadata(session *Session, keyspaceName string) ([]AggregateMe
 			argument_types,
 			final_func,
 			initcond,
-			return_type,
 			state_func,
 			state_type
 		FROM %s
@@ -2108,6 +2110,8 @@ func getAllAggregatesMetadata(session *Session) (map[string][]AggregateMetadata,
 		tableName = "system.schema_aggregates"
 	}
 
+	// `return_type` is omitted: YugabyteDB's system_schema.aggregates has no
+	// such column.
 	stmt := fmt.Sprintf(`
 		SELECT
 			keyspace_name,
@@ -2115,7 +2119,6 @@ func getAllAggregatesMetadata(session *Session) (map[string][]AggregateMetadata,
 			argument_types,
 			final_func,
 			initcond,
-			return_type,
 			state_func,
 			state_type
 		FROM %s`, tableName)
@@ -2140,19 +2143,14 @@ func getAggregatesMetadataFromIter(session *Session, iter *Iter) (map[string][]A
 			&aggregate.argumentTypesRaw,
 			&aggregate.finalFunc,
 			&aggregate.InitCond,
-			&aggregate.returnTypeRaw,
 			&aggregate.stateFunc,
 			&aggregate.stateTypeRaw,
 		)
 		if err != nil {
 			return nil, err
 		}
-		aggregate.ReturnType, err = session.types.typeInfoFromString(session.cfg.ProtoVersion, aggregate.returnTypeRaw)
-		if err != nil {
-			// we don't error out completely for unknown types because we didn't before
-			// and the caller might not care about this type
-			aggregate.ReturnType = unknownTypeInfo(aggregate.returnTypeRaw)
-		}
+		// ReturnType is left unset: YugabyteDB does not expose `return_type` for
+		// aggregates, so there is nothing to derive it from.
 		aggregate.StateType, err = session.types.typeInfoFromString(session.cfg.ProtoVersion, aggregate.stateTypeRaw)
 		if err != nil {
 			// we don't error out completely for unknown types because we didn't before
