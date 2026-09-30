@@ -1,16 +1,150 @@
 # Changelog
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.1.2]
+
+### Fixed
+
+- Prevent panic when using a HostFilter and keyspace is not replicated to every DC (CASSGO-122)
+- system.peers fallback doesn't work in some scenarios (CASSGO-126)
+- Many "Pool connection error" with small Session.Timeout (CASSGO-125)
+
+## [2.1.1]
+
+### Fixed
+
+- Iter.MapScan is unable to scan data of user-defined types fix (CASSGO-115)
+
+## [2.1.0]
 
 ### Added
 
+- Session.StatementMetadata (CASSGO-92)
+- NewLogFieldIP, NewLogFieldError, NewLogFieldStringer, NewLogFieldString, NewLogFieldInt, NewLogFieldBool (CASSGO-92)
+- Introduced configurable schema metadata caching modes to control what metadata is cached (CASSGO-107)
+- Support for session ready, host state, topology change and schema changes custom listeners (CASSGO-101)
+- Add Session.AllKeyspaceMetadata() (CASSGO-109)
+- Add GetSerialConsistency method to Query and Batch (CASSGO-103)
+- Add RequestErrOverloaded, RequestErrBootstrapping, RequestErrInvalid, RequestErrConfig, RequestErrCredentials, RequestErrSyntax, RequestErrTruncate, RequestErrUnauthorized for dedicated error handling (CASSGO-113)
+
 ### Changed
 
+- Use protocol downgrading approach during protocol negotiation (CASSGO-97)
+- TokenAwareHostPolicy now populates replica maps for non-default keyspaces (CASSGO-104)
+- Add options to shuffle replicas for token-aware policy and log warning when the default behavior is used (CASSGO-106)
+- Bump Go version support from 1.22 and 1.23 to 1.25 and 1.26 (CASSGO-110)
+- Upgraded Github actions dependencies versions (CASSGO-111)
+- Fix a couple of issues related to CASSGO-101 (CASSGO-114)
+
 ### Fixed
+
+- Prevent panic with queries during session init (CASSGO-92)
+- Return correct values from RowData (CASSGO-95)
+- Prevent setting a compression flag in a frame header when native proto v5 is being used (CASSGO-98)
+- Prevent panic iin compileMetadata() when final func is not defined for an aggregate (CASSGO-105)
+- Framer drops error silently (CASSGO-108)
+
+## [2.0.0]
+
+### Removed
+
+#### 2.0.0-rc1
+
+- Drop support for old CQL protocol versions: 1 and 2 (CASSGO-75)
+- Cleanup of deprecated elements (CASSGO-12)
+- Remove global NewBatch function (CASSGO-15)
+- Remove deprecated global logger (CASSGO-24)
+- HostInfo.SetHostID is no longer exported (CASSGO-71)
+
+### Added
+
+#### 2.0.0
+
+- Don't collect host metrics if a query/batch observer is not provided (CASSGO-90)
+
+#### 2.0.0-rc1
+
+- Support vector type (CASSGO-11)
+- Allow SERIAL and LOCAL_SERIAL on SELECT statements (CASSGO-26)
+- Support of sending queries to the specific node with Query.SetHostID() (CASSGO-4)
+- Support for Native Protocol 5. Following protocol changes exposed new API
+  Query.SetKeyspace(), Query.WithNowInSeconds(), Batch.SetKeyspace(), Batch.WithNowInSeconds() (CASSGO-1)
+- Externally-defined type registration (CASSGO-43)
+- Add Query and Batch to ObservedQuery and ObservedBatch (CASSGO-73)
+- Add way to create HostInfo objects for testing purposes (CASSGO-71)
+- Add missing Context methods on Query and Batch (CASSGO-81)
+- Update example and test code for 2.0 release (CASSGO-80)
+- Add API docs for 2.0 release (CASSGO-78)
+- Update documentation for 2.0 (readme, upgrade guide, pkg.go.dev) (CASSGO-79)
+
+### Changed
+
+#### 2.0.0
+
+- Remove release date from changelog and add 2.0.0-rc1 (CASSGO-86)
+
+#### 2.0.0-rc1
+
+- Moved the Snappy compressor into its own separate package (CASSGO-33)
+- Move lz4 compressor to lz4 package within the gocql module (CASSGO-32)
+- Don't restrict server authenticator unless PasswordAuthentictor.AllowedAuthenticators is provided (CASSGO-19)
+- Detailed description for NumConns (CASSGO-3)
+- Change Batch API to be consistent with Query() (CASSGO-7)
+- Added Cassandra 4.0 table options support (CASSGO-13)
+- Bumped actions/upload-artifact and actions/cache versions to v4 in CI workflow (CASSGO-48)
+- Keep nil slices in MapScan (CASSGO-44)
+- Improve error messages for marshalling (CASSGO-38)
+- Remove HostPoolHostPolicy from gocql package (CASSGO-21)
+- Standardized spelling of datacenter (CASSGO-35)
+- Refactor HostInfo creation and ConnectAddress() method (CASSGO-45)
+- gocql.Compressor interface changes to follow append-like design (CASSGO-1)
+- Refactoring hostpool package test and Expose HostInfo creation (CASSGO-59)
+- Move "execute batch" methods to Batch type (CASSGO-57)
+- Make `Session` immutable by removing setters and associated mutex (CASSGO-23)
+- inet columns default to net.IP when using MapScan or SliceMap (CASSGO-43)
+- NativeType removed (CASSGO-43)
+- `New` and `NewWithError` removed and replaced with `Zero` (CASSGO-43)
+- Changes to Query and Batch to make them safely reusable (CASSGO-22)
+- Change logger interface so it supports structured logging and log levels (CASSGO-9)
+- Bump go version in go.mod to 1.19 (CASSGO-34)
+- Change module name to github.com/apache/cassandra-gocql-driver/v2 (CASSGO-70)
+
+### Fixed
+
+#### 2.0.0
+
+- Driver closes connection when timeout occurs (CASSGO-87)
+- Do not set beta protocol flag when using v5 (CASSGO-88)
+- Driver is using system table ip addresses over the connection address (CASSGO-91)
+
+#### 2.0.0-rc1
+
+- Cassandra version unmarshal fix (CASSGO-49)
+- Retry policy now takes into account query idempotency (CASSGO-27)
+- Don't return error to caller with RetryType Ignore (CASSGO-28)
+- The marshalBigInt return 8 bytes slice in all cases except for big.Int,
+  which returns a variable length slice, but should be 8 bytes slice as well (CASSGO-2)
+- Skip metadata only if the prepared result includes metadata (CASSGO-40)
+- Don't panic in MapExecuteBatchCAS if no `[applied]` column is returned (CASSGO-42)
+- Fix deadlock in refresh debouncer stop (CASSGO-41)
+- Endless query execution fix (CASSGO-50)
+- Accept peers with empty rack (CASSGO-6)
+- Fix tinyint unmarshal regression (CASSGO-82)
+- Vector columns can't be used with SliceMap() (CASSGO-83)
+
+## [1.7.0] - 2024-09-23
+
+This release is the first after the donation of gocql to the Apache Software Foundation (ASF)
+
+### Changed
+- Update DRIVER_NAME parameter in STARTUP messages to a different value intended to clearly identify this
+  driver as an ASF driver.  This should clearly distinguish this release (and future cassandra-gocql-driver
+  releases) from prior versions. (#1824)
+- Supported Go versions updated to 1.23 and 1.22 to conform to gocql's sunset model. (#1825)
 
 ## [1.6.0] - 2023-08-28
 

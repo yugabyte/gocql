@@ -1,6 +1,30 @@
 //go:build all || cassandra
 // +build all cassandra
 
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql
 
 import (
@@ -47,10 +71,6 @@ func (p *position) UnmarshalUDT(name string, info TypeInfo, data []byte) error {
 func TestUDT_Marshaler(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
-
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.position(
 		lat int,
@@ -105,10 +125,6 @@ func TestUDT_Reflect(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
 
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	err := createTable(session, `CREATE TYPE gocql_test.horse(
 		name text,
 		owner text);`)
@@ -152,21 +168,9 @@ func TestUDT_Reflect(t *testing.T) {
 	}
 }
 
-func TestUDT_Proto2error(t *testing.T) {
-	// TODO(zariel): move this to marshal test?
-	_, err := Marshal(NativeType{custom: "org.apache.cassandra.db.marshal.UserType.Type", proto: 2}, 1)
-	if err != ErrorUDTUnavailable {
-		t.Fatalf("expected %v got %v", ErrUnavailable, err)
-	}
-}
-
 func TestUDT_NullObject(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
-
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.udt_null_type(
 		name text,
@@ -217,10 +221,6 @@ func TestUDT_NullObject(t *testing.T) {
 func TestMapScanUDT(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
-
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.log_entry (
 		created_timestamp timestamp,
@@ -305,10 +305,6 @@ func TestUDT_MissingField(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
 
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	err := createTable(session, `CREATE TYPE gocql_test.missing_field(
 		name text,
 		owner text);`)
@@ -354,10 +350,6 @@ func TestUDT_MissingField(t *testing.T) {
 func TestUDT_EmptyCollections(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
-
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.nil_collections(
 		a list<text>,
@@ -411,10 +403,6 @@ func TestUDT_UpdateField(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
 
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
-
 	err := createTable(session, `CREATE TYPE gocql_test.update_field_udt(
 		name text,
 		owner text);`)
@@ -467,10 +455,6 @@ func TestUDT_UpdateField(t *testing.T) {
 func TestUDT_ScanNullUDT(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
-
-	if session.cfg.ProtoVersion < protoVersion3 {
-		t.Skip("UDT are only available on protocol >= 3")
-	}
 
 	err := createTable(session, `CREATE TYPE gocql_test.scan_null_udt_position(
 		lat int,

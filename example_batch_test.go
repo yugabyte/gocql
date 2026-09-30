@@ -1,10 +1,35 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql_test
 
 import (
 	"context"
 	"fmt"
-	"github.com/yugabyte/gocql"
 	"log"
+
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // Example_batch demonstrates how to execute a batch of statements.
@@ -24,23 +49,46 @@ func Example_batch() {
 
 	ctx := context.Background()
 
-	b := session.NewBatch(gocql.UnloggedBatch).WithContext(ctx)
-	b.Entries = append(b.Entries, gocql.BatchEntry{
-		Stmt:       "INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)",
-		Args:       []interface{}{1, 2, "1.2"},
-		Idempotent: true,
-	})
-	b.Entries = append(b.Entries, gocql.BatchEntry{
-		Stmt:       "INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)",
-		Args:       []interface{}{1, 3, "1.3"},
-		Idempotent: true,
-	})
-	err = session.ExecuteBatch(b)
+	// Example 1: Simple batch using the Query() method - recommended approach
+	batch := session.Batch(gocql.LoggedBatch)
+	batch.Query("INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)", 1, 2, "1.2")
+	batch.Query("INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)", 1, 3, "1.3")
+
+	err = batch.ExecContext(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	scanner := session.Query("SELECT pk, ck, description FROM example.batches").Iter().Scanner()
+	// Example 2: Advanced batch usage with Entries for more control
+	b := session.Batch(gocql.UnloggedBatch)
+	b.Entries = append(b.Entries, gocql.BatchEntry{
+		Stmt:       "INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)",
+		Args:       []interface{}{1, 4, "1.4"},
+		Idempotent: true,
+	})
+	b.Entries = append(b.Entries, gocql.BatchEntry{
+		Stmt:       "INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)",
+		Args:       []interface{}{1, 5, "1.5"},
+		Idempotent: true,
+	})
+
+	err = b.ExecContext(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Example 3: Fluent style chaining
+	err = session.Batch(gocql.LoggedBatch).
+		Query("INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)", 1, 6, "1.6").
+		Query("INSERT INTO example.batches (pk, ck, description) VALUES (?, ?, ?)", 1, 7, "1.7").
+		ExecContext(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// Verification: Display all inserted data
+	fmt.Println("All inserted data:")
+	scanner := session.Query("SELECT pk, ck, description FROM example.batches").IterContext(ctx).Scanner()
 	for scanner.Next() {
 		var pk, ck int32
 		var description string
@@ -50,6 +98,16 @@ func Example_batch() {
 		}
 		fmt.Println(pk, ck, description)
 	}
+
+	if err := scanner.Err(); err != nil {
+		log.Fatal(err)
+	}
+
+	// All inserted data:
 	// 1 2 1.2
 	// 1 3 1.3
+	// 1 4 1.4
+	// 1 5 1.5
+	// 1 6 1.6
+	// 1 7 1.7
 }

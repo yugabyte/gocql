@@ -1,12 +1,37 @@
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql_test
 
 import (
 	"context"
 	"fmt"
-	"github.com/yugabyte/gocql"
 	"log"
 	"strconv"
 	"strings"
+
+	gocql "github.com/yugabyte/gocql/v2"
 )
 
 // MyMarshaler implements Marshaler and Unmarshaler.
@@ -70,20 +95,20 @@ func Example_marshalerUnmarshaler() {
 		patch: 3,
 	}
 	err = session.Query("INSERT INTO example.my_marshaler_table (pk, value) VALUES (?, ?)",
-		1, value).WithContext(ctx).Exec()
+		1, value).ExecContext(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
 	var stringValue string
-	err = session.Query("SELECT value FROM example.my_marshaler_table WHERE pk = 1").WithContext(ctx).
-		Scan(&stringValue)
+	err = session.Query("SELECT value FROM example.my_marshaler_table WHERE pk = 1").
+		ScanContext(ctx, &stringValue)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println(stringValue)
 	var unmarshaledValue MyMarshaler
-	err = session.Query("SELECT value FROM example.my_marshaler_table WHERE pk = 1").WithContext(ctx).
-		Scan(&unmarshaledValue)
+	err = session.Query("SELECT value FROM example.my_marshaler_table WHERE pk = 1").
+		ScanContext(ctx, &unmarshaledValue)
 	if err != nil {
 		log.Fatal(err)
 	}

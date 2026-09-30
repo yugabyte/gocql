@@ -1,9 +1,44 @@
+//go:build all || unit
+// +build all unit
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
+	"reflect"
 	"testing"
+
+	"github.com/yugabyte/gocql/v2/lz4"
+	"github.com/yugabyte/gocql/v2/snappy"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestFuzzBugs(t *testing.T) {
@@ -33,15 +68,13 @@ func TestFuzzBugs(t *testing.T) {
 	}
 
 	for i, test := range tests {
-		t.Logf("test %d input: %q", i, test)
-
 		r := bytes.NewReader(test)
 		head, err := readHeader(r, make([]byte, 9))
 		if err != nil {
 			continue
 		}
 
-		framer := newFramer(nil, byte(head.version))
+		framer := newFramer(nil, byte(head.version), GlobalTypes)
 		err = framer.readFrame(r, &head)
 		if err != nil {
 			continue
@@ -62,7 +95,7 @@ func TestFrameWriteTooLong(t *testing.T) {
 		t.Skip("skipping test in travis due to memory pressure with the race detecor")
 	}
 
-	framer := newFramer(nil, 2)
+	framer := newFramer(nil, 2, GlobalTypes)
 
 	framer.writeHeader(0, opStartup, 1)
 	framer.writeBytes(make([]byte, maxFrameSize+1))
@@ -80,14 +113,14 @@ func TestFrameReadTooLong(t *testing.T) {
 	r := &bytes.Buffer{}
 	r.Write(make([]byte, maxFrameSize+1))
 	// write a new header right after this frame to verify that we can read it
-	r.Write([]byte{0x02, 0x00, 0x00, byte(opReady), 0x00, 0x00, 0x00, 0x00})
+	r.Write([]byte{protoVersionMask & protoVersion3, 0x00, 0x00, 0x00, byte(opReady), 0x00, 0x00, 0x00, 0x00})
 
-	framer := newFramer(nil, 2)
+	framer := newFramer(nil, 3, GlobalTypes)
 
 	head := frameHeader{
-		version: 2,
+		version: protoVersion3,
 		op:      opReady,
-		length:  r.Len() - 8,
+		length:  r.Len() - frameHeadSize,
 	}
 
 	err := framer.readFrame(r, &head)
@@ -95,11 +128,1031 @@ func TestFrameReadTooLong(t *testing.T) {
 		t.Fatalf("expected to get %v got %v", ErrFrameTooBig, err)
 	}
 
-	head, err = readHeader(r, make([]byte, 8))
+	head, err = readHeader(r, make([]byte, frameHeadSize))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if head.op != opReady {
 		t.Fatalf("expected to get header %v got %v", opReady, head.op)
+	}
+}
+
+func Test_framer_writeExecuteFrame(t *testing.T) {
+	framer := newFramer(nil, protoVersion5, GlobalTypes)
+	nowInSeconds := 123
+	frame := writeExecuteFrame{
+		preparedID:       []byte{1, 2, 3},
+		resultMetadataID: []byte{4, 5, 6},
+		customPayload: map[string][]byte{
+			"key1": []byte("value1"),
+		},
+		params: queryParams{
+			nowInSeconds: &nowInSeconds,
+			keyspace:     "test_keyspace",
+		},
+	}
+
+	err := framer.writeExecuteFrame(123, frame.preparedID, frame.resultMetadataID, &frame.params, &frame.customPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// skipping header
+	framer.buf = framer.buf[9:]
+
+	bm, err := framer.readBytesMap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "customPayload", frame.customPayload, bm)
+	b, err := framer.readShortBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "preparedID", frame.preparedID, b)
+	b, err = framer.readShortBytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "resultMetadataID", frame.resultMetadataID, b)
+	c, err := framer.readConsistency()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "constistency", frame.params.consistency, c)
+
+	flags, err := framer.readInt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&int(flagWithNowInSeconds) != int(flagWithNowInSeconds) {
+		t.Fatal("expected flagNowInSeconds to be set, but it is not")
+	}
+
+	if flags&int(flagWithKeyspace) != int(flagWithKeyspace) {
+		t.Fatal("expected flagWithKeyspace to be set, but it is not")
+	}
+
+	k, err := framer.readString()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "keyspace", frame.params.keyspace, k)
+	secs, err := framer.readInt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "nowInSeconds", nowInSeconds, secs)
+}
+
+func Test_framer_writeBatchFrame(t *testing.T) {
+	framer := newFramer(nil, protoVersion5, GlobalTypes)
+	nowInSeconds := 123
+	frame := writeBatchFrame{
+		customPayload: map[string][]byte{
+			"key1": []byte("value1"),
+		},
+		nowInSeconds: &nowInSeconds,
+	}
+
+	err := framer.writeBatchFrame(123, &frame, frame.customPayload)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// skipping header
+	framer.buf = framer.buf[9:]
+
+	bm, err := framer.readBytesMap()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "customPayload", frame.customPayload, bm)
+	b, err := framer.readByte()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "typ", frame.typ, BatchType(b))
+	l, err := framer.readShort()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "len(statements)", len(frame.statements), int(l))
+	c, err := framer.readConsistency()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "consistency", frame.consistency, c)
+
+	flags, err := framer.readInt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if flags&int(flagWithNowInSeconds) != int(flagWithNowInSeconds) {
+		t.Fatal("expected flagNowInSeconds to be set, but it is not")
+	}
+
+	secs, err := framer.readInt()
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertDeepEqual(t, "nowInSeconds", nowInSeconds, secs)
+}
+
+type testMockedCompressor struct {
+	// this is an error its methods should return
+	expectedError error
+
+	// invalidateDecodedDataLength allows to simulate data decoding invalidation
+	invalidateDecodedDataLength bool
+}
+
+func (m testMockedCompressor) Name() string {
+	return "testMockedCompressor"
+}
+
+func (m testMockedCompressor) AppendCompressed(_, src []byte) ([]byte, error) {
+	if m.expectedError != nil {
+		return nil, m.expectedError
+	}
+	return src, nil
+}
+
+func (m testMockedCompressor) AppendDecompressed(_, src []byte, decompressedLength uint32) ([]byte, error) {
+	if m.expectedError != nil {
+		return nil, m.expectedError
+	}
+
+	// simulating invalid size of decoded data
+	if m.invalidateDecodedDataLength {
+		return src[:decompressedLength-1], nil
+	}
+
+	return src, nil
+}
+
+func (m testMockedCompressor) AppendCompressedWithLength(dst, src []byte) ([]byte, error) {
+	panic("testMockedCompressor.AppendCompressedWithLength is not implemented")
+}
+
+func (m testMockedCompressor) AppendDecompressedWithLength(dst, src []byte) ([]byte, error) {
+	panic("testMockedCompressor.AppendDecompressedWithLength is not implemented")
+}
+
+func Test_readUncompressedFrame(t *testing.T) {
+	tests := []struct {
+		name        string
+		modifyFrame func([]byte) []byte
+		expectedErr string
+	}{
+		{
+			name: "header crc24 mismatch",
+			modifyFrame: func(frame []byte) []byte {
+				// simulating some crc invalidation
+				frame[0] = 255
+				return frame
+			},
+			expectedErr: "gocql: crc24 mismatch in frame header",
+		},
+		{
+			name: "body crc32 mismatch",
+			modifyFrame: func(frame []byte) []byte {
+				// simulating body crc32 mismatch
+				frame[len(frame)-1] = 255
+				return frame
+			},
+			expectedErr: "gocql: payload crc32 mismatch",
+		},
+		{
+			name: "invalid frame length",
+			modifyFrame: func(frame []byte) []byte {
+				// simulating body length invalidation
+				frame = frame[:7]
+				return frame
+			},
+			expectedErr: "gocql: failed to read uncompressed frame payload",
+		},
+		{
+			name: "cannot read body checksum",
+			modifyFrame: func(frame []byte) []byte {
+				// simulating body length invalidation
+				frame = frame[:len(frame)-4]
+				return frame
+			},
+			expectedErr: "gocql: failed to read payload crc32",
+		},
+		{
+			name:        "success",
+			modifyFrame: nil,
+			expectedErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			framer := newFramer(nil, protoVersion5, GlobalTypes)
+			req := writeQueryFrame{
+				statement: "SELECT * FROM system.local",
+				params: queryParams{
+					consistency: Quorum,
+					keyspace:    "gocql_test",
+				},
+			}
+
+			err := req.buildFrame(framer, 128)
+			require.NoError(t, err)
+
+			frame, err := newUncompressedSegment(framer.buf, true)
+			require.NoError(t, err)
+
+			if tt.modifyFrame != nil {
+				frame = tt.modifyFrame(frame)
+			}
+
+			readFrame, isSelfContained, err := readUncompressedSegment(bytes.NewReader(frame))
+
+			if tt.expectedErr != "" {
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.expectedErr)
+			} else {
+				require.NoError(t, err)
+				assert.True(t, isSelfContained)
+				assert.Equal(t, framer.buf, readFrame)
+			}
+		})
+	}
+}
+
+func Test_readCompressedFrame(t *testing.T) {
+	tests := []struct {
+		name string
+		// modifyFrameFn is useful for simulating frame data invalidation
+		modifyFrameFn func([]byte) []byte
+		compressor    testMockedCompressor
+
+		// expectedErrorMsg is an error message that should be returned by Error() method.
+		// We need this to understand which of fmt.Errorf() is returned
+		expectedErrorMsg string
+	}{
+		{
+			name: "header crc24 mismatch",
+			modifyFrameFn: func(frame []byte) []byte {
+				// simulating some crc invalidation
+				frame[0] = 255
+				return frame
+			},
+			expectedErrorMsg: "gocql: crc24 mismatch in frame header",
+		},
+		{
+			name: "body crc32 mismatch",
+			modifyFrameFn: func(frame []byte) []byte {
+				// simulating body crc32 mismatch
+				frame[len(frame)-1] = 255
+				return frame
+			},
+			expectedErrorMsg: "gocql: crc32 mismatch in payload",
+		},
+		{
+			name: "invalid frame length",
+			modifyFrameFn: func(frame []byte) []byte {
+				// simulating body length invalidation
+				return frame[:12]
+			},
+			expectedErrorMsg: "gocql: failed to read compressed frame payload",
+		},
+		{
+			name: "cannot read body checksum",
+			modifyFrameFn: func(frame []byte) []byte {
+				// simulating body length invalidation
+				return frame[:len(frame)-4]
+			},
+			expectedErrorMsg: "gocql: failed to read payload crc32",
+		},
+		{
+			name:          "failed to encode payload",
+			modifyFrameFn: nil,
+			compressor: testMockedCompressor{
+				expectedError: errors.New("failed to encode payload"),
+			},
+			expectedErrorMsg: "failed to encode payload",
+		},
+		{
+			name:          "failed to decode payload",
+			modifyFrameFn: nil,
+			compressor: testMockedCompressor{
+				expectedError: errors.New("failed to decode payload"),
+			},
+			expectedErrorMsg: "failed to decode payload",
+		},
+		{
+			name:          "length mismatch after decoding",
+			modifyFrameFn: nil,
+			compressor: testMockedCompressor{
+				invalidateDecodedDataLength: true,
+			},
+			expectedErrorMsg: "gocql: length mismatch after payload decoding",
+		},
+		{
+			name:             "success",
+			modifyFrameFn:    nil,
+			expectedErrorMsg: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			framer := newFramer(nil, protoVersion5, GlobalTypes)
+			req := writeQueryFrame{
+				statement: "SELECT * FROM system.local",
+				params: queryParams{
+					consistency: Quorum,
+					keyspace:    "gocql_test",
+				},
+			}
+
+			err := req.buildFrame(framer, 128)
+			require.NoError(t, err)
+
+			frame, err := newCompressedSegment(framer.buf, true, testMockedCompressor{})
+			require.NoError(t, err)
+
+			if tt.modifyFrameFn != nil {
+				frame = tt.modifyFrameFn(frame)
+			}
+
+			readFrame, selfContained, err := readCompressedSegment(bytes.NewReader(frame), tt.compressor)
+
+			switch {
+			case tt.expectedErrorMsg != "":
+				require.Error(t, err)
+				require.Contains(t, err.Error(), tt.expectedErrorMsg)
+			case tt.compressor.expectedError != nil:
+				require.ErrorIs(t, err, tt.compressor.expectedError)
+			default:
+				require.NoError(t, err)
+				assert.True(t, selfContained)
+				assert.Equal(t, framer.buf, readFrame)
+			}
+		})
+	}
+}
+
+func TestFrameReadParam(t *testing.T) {
+	testCases := []struct {
+		Write func(*framer)
+		Param interface{}
+		Exp   interface{}
+	}{
+		{
+			Write: func(f *framer) {
+				f.writeString("foo")
+			},
+			Param: "",
+			Exp:   "foo",
+		},
+		{
+			Write: func(f *framer) {
+				f.writeShort(2)
+				f.writeString("foo")
+				f.writeString("bar")
+			},
+			Param: []interface{}{"", ""},
+			Exp:   []interface{}{"foo", "bar"},
+		},
+		{
+			Write: func(f *framer) {
+				f.writeShort(uint16(TypeBoolean))
+			},
+			Param: (*TypeInfo)(nil),
+			Exp:   booleanTypeInfo{},
+		},
+		{
+			Write: func(f *framer) {
+				f.writeInt(5)
+			},
+			Param: int(0),
+			Exp:   int(5),
+		},
+		{
+			Write: func(f *framer) {
+				f.writeInt(5)
+			},
+			Param: new(int),
+			Exp:   int(5),
+		},
+		{
+			Write: func(f *framer) {
+				f.writeShort(5)
+			},
+			Param: uint16(0),
+			Exp:   uint16(5),
+		},
+		{
+			Write: func(f *framer) {
+				f.writeByte(10)
+			},
+			Param: byte(0),
+			Exp:   byte(10),
+		},
+		{
+			Write: func(f *framer) {
+				f.writeShort(uint16(TypeBoolean))
+			},
+			Param: Type(0),
+			Exp:   TypeBoolean,
+		},
+		{
+			Write: func(f *framer) {
+				f.writeShort(2)
+				f.writeShort(uint16(TypeBoolean))
+				f.writeShort(uint16(TypeBoolean))
+			},
+			Param: []TypeInfo{},
+			Exp:   []TypeInfo{booleanTypeInfo{}, booleanTypeInfo{}},
+		},
+		{
+			Write: func(f *framer) {
+				f.writeShort(2)
+				f.writeShort(uint16(TypeBoolean))
+				f.writeShort(uint16(TypeBoolean))
+			},
+			Param: []TypeInfo{nil, nil},
+			Exp:   []TypeInfo{booleanTypeInfo{}, booleanTypeInfo{}},
+		},
+		{
+			Write: func(f *framer) {
+				f.writeInt(5)
+			},
+			Param: func() *interface{} {
+				var i interface{}
+				i = int(0)
+				return &i
+			}(),
+			Exp: int(5),
+		},
+	}
+	for i := range testCases {
+		framer := newFramer(nil, 4, GlobalTypes)
+		testCases[i].Write(framer)
+		res, err := framer.readParam(testCases[i].Param)
+		if err != nil {
+			t.Errorf("[%d] unexpected error: %v", i, err)
+		} else if !reflect.DeepEqual(res, testCases[i].Exp) {
+			t.Errorf("[%d] expected %+v, got %+v", i, testCases[i].Exp, res)
+		}
+	}
+}
+
+func TestFrameReadTypeInfo(t *testing.T) {
+	tests := []struct {
+		name     string
+		typ      Type
+		more     func(f *framer)
+		custom   string
+		expected TypeInfo
+	}{
+		{
+			name: "text",
+			typ:  TypeVarchar,
+			expected: varcharLikeTypeInfo{
+				typ: TypeVarchar,
+			},
+		},
+		{
+			name:     "boolean",
+			typ:      TypeBoolean,
+			expected: booleanTypeInfo{},
+		},
+		{
+			name: "set_int",
+			typ:  TypeSet,
+			more: func(f *framer) {
+				f.writeShort(uint16(TypeInt))
+			},
+			expected: CollectionType{
+				typ:  TypeSet,
+				Elem: intTypeInfo{},
+			},
+		},
+		{
+			name: "list_int",
+			typ:  TypeList,
+			more: func(f *framer) {
+				f.writeShort(uint16(TypeInt))
+			},
+			expected: CollectionType{
+				typ:  TypeList,
+				Elem: intTypeInfo{},
+			},
+		},
+		{
+			name: "list_list_int",
+			typ:  TypeList,
+			more: func(f *framer) {
+				f.writeShort(uint16(TypeList))
+				f.writeShort(uint16(TypeInt))
+			},
+			expected: CollectionType{
+				typ: TypeList,
+				Elem: CollectionType{
+					typ:  TypeList,
+					Elem: intTypeInfo{},
+				},
+			},
+		},
+		{
+			name: "map_int_int",
+			typ:  TypeMap,
+			more: func(f *framer) {
+				f.writeShort(uint16(TypeInt))
+				f.writeShort(uint16(TypeInt))
+			},
+			expected: CollectionType{
+				typ:  TypeMap,
+				Key:  intTypeInfo{},
+				Elem: intTypeInfo{},
+			},
+		},
+		{
+			name: "list_list_int",
+			typ:  TypeUDT,
+			more: func(f *framer) {
+				f.writeString("gocql_test")
+				f.writeString("person")
+				f.writeShort(3)
+				f.writeString("first_name")
+				f.writeShort(uint16(TypeVarchar))
+				f.writeString("last_name")
+				f.writeShort(uint16(TypeVarchar))
+				f.writeString("age")
+				f.writeShort(uint16(TypeInt))
+			},
+			expected: UDTTypeInfo{
+				Keyspace: "gocql_test",
+				Name:     "person",
+				Elements: []UDTField{
+					{Name: "first_name", Type: varcharLikeTypeInfo{typ: TypeVarchar}},
+					{Name: "last_name", Type: varcharLikeTypeInfo{typ: TypeVarchar}},
+					{Name: "age", Type: intTypeInfo{}},
+				},
+			},
+		},
+		{
+			name: "tuple_int_int",
+			typ:  TypeTuple,
+			more: func(f *framer) {
+				f.writeShort(2)
+				f.writeShort(uint16(TypeInt))
+				f.writeShort(uint16(TypeInt))
+			},
+			expected: TupleTypeInfo{
+				Elems: []TypeInfo{
+					intTypeInfo{},
+					intTypeInfo{},
+				},
+			},
+		},
+
+		// these abuse the custom type to test some cases of typeInfoFromString
+		{
+			name:   "vector_text",
+			typ:    TypeCustom,
+			custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.UTF8Type, 3)",
+			expected: VectorType{
+				SubType: varcharLikeTypeInfo{
+					typ: TypeVarchar,
+				},
+				Dimensions: 3,
+			},
+		},
+		{
+			name:   "vector_set_int",
+			typ:    TypeCustom,
+			custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type), 2)",
+			expected: VectorType{
+				SubType: CollectionType{
+					typ:  TypeSet,
+					Elem: intTypeInfo{},
+				},
+				Dimensions: 2,
+			},
+		},
+		{
+			name:   "vector_udt",
+			typ:    TypeCustom,
+			custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.UserType(gocql_test,706572736f6e,66697273745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,6c6173745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,616765:org.apache.cassandra.db.marshal.Int32Type), 2)",
+			expected: VectorType{
+				SubType: UDTTypeInfo{
+					Keyspace: "gocql_test",
+					Name:     "person",
+					Elements: []UDTField{
+						{Name: "first_name", Type: varcharLikeTypeInfo{typ: TypeVarchar}},
+						{Name: "last_name", Type: varcharLikeTypeInfo{typ: TypeVarchar}},
+						{Name: "age", Type: intTypeInfo{}},
+					},
+				},
+				Dimensions: 2,
+			},
+		},
+		{
+			name:   "vector_tuple",
+			typ:    TypeCustom,
+			custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.TupleType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type,org.apache.cassandra.db.marshal.UTF8Type), 2)",
+			expected: VectorType{
+				SubType: TupleTypeInfo{
+					Elems: []TypeInfo{
+						varcharLikeTypeInfo{typ: TypeVarchar},
+						intTypeInfo{},
+						varcharLikeTypeInfo{typ: TypeVarchar},
+					},
+				},
+				Dimensions: 2,
+			},
+		},
+		{
+			name:   "vector_vector_inet",
+			typ:    TypeCustom,
+			custom: "org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.VectorType(org.apache.cassandra.db.marshal.InetAddressType, 2), 3)",
+			expected: VectorType{
+				SubType: VectorType{
+					SubType:    inetType{},
+					Dimensions: 2,
+				},
+				Dimensions: 3,
+			},
+		},
+	}
+
+	// org.apache.cassandra.db.marshal.VectorType(%s, 2)
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFramer(nil, 4, GlobalTypes)
+			f.writeShort(uint16(test.typ))
+			if test.typ == TypeCustom {
+				f.writeString(test.custom)
+			} else if test.more != nil {
+				test.more(f)
+			}
+			parsedType, err := f.readTypeInfo()
+			require.NoError(t, err)
+			if len(f.buf) != 0 {
+				t.Errorf("frame's buffer was not empty after readTypeInfo: %d left", len(f.buf))
+			}
+			if !reflect.DeepEqual(test.expected, parsedType) {
+				t.Errorf("expected (%#v) but was (%#v) instead", test.expected, parsedType)
+			}
+		})
+	}
+}
+
+func BenchmarkFramerReadCol_Tuple(b *testing.B) {
+	b.ReportAllocs()
+	framer := newFramer(nil, 4, GlobalTypes)
+	framer.writeString("foo")
+	framer.writeShort(uint16(TypeTuple))
+	framer.writeShort(uint16(2))
+	framer.writeShort(uint16(TypeVarchar))
+	framer.writeShort(uint16(TypeVarchar))
+	buf := framer.buf
+	var col ColumnInfo
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		framer.buf = buf
+		_ = framer.readCol(&col, nil, true, "", "")
+	}
+}
+
+func BenchmarkFramerReadCol_Set(b *testing.B) {
+	b.ReportAllocs()
+
+	framer := newFramer(nil, 4, GlobalTypes)
+	framer.writeString("foo")
+	framer.writeShort(uint16(TypeSet))
+	framer.writeShort(uint16(TypeInt))
+	buf := framer.buf
+	var col ColumnInfo
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		framer.buf = buf
+		_ = framer.readCol(&col, nil, true, "", "")
+	}
+}
+
+func Test_newFrame_compressionFlag(t *testing.T) {
+	tests := []struct {
+		name          string
+		protoVersion  protoVersion
+		compressor    Compressor
+		expectedFlags byte
+	}{
+		{
+			name:          "proto3-nil-compressor",
+			protoVersion:  protoVersion3,
+			compressor:    nil,
+			expectedFlags: 0, // no flags
+		},
+		{
+			name:          "proto3-snappy-compressor",
+			protoVersion:  protoVersion3,
+			compressor:    snappy.SnappyCompressor{},
+			expectedFlags: 0b1, // compressions is enabled
+		},
+		{
+			name:          "proto4-nil-compressor",
+			protoVersion:  protoVersion4,
+			compressor:    nil,
+			expectedFlags: 0,
+		},
+		{
+			name:          "proto4-snappy-compressor",
+			protoVersion:  protoVersion4,
+			compressor:    snappy.SnappyCompressor{},
+			expectedFlags: 0b1,
+		},
+		{
+			name:          "proto5-nil-compressor",
+			protoVersion:  protoVersion5,
+			compressor:    nil,
+			expectedFlags: 0,
+		},
+		{
+			// In protocol v5 compression happens on the segment level (v5 new frame format). The body of the frame (envelope)
+			// is not compressed, so we don't have to set compression flag in the frame header
+			name:          "proto5-lz4-compressor-no-compression-flag",
+			protoVersion:  protoVersion5,
+			compressor:    lz4.LZ4Compressor{},
+			expectedFlags: 0,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			f := newFramer(test.compressor, byte(test.protoVersion), GlobalTypes)
+			require.Equal(t, test.expectedFlags, f.flags)
+		})
+	}
+}
+
+func newErrorFrameForTest(code int, msg string) *framer {
+	f := newFramer(nil, protoVersion4, GlobalTypes)
+	f.header = &frameHeader{
+		version: protoVersion4 | protoDirectionMask,
+		stream:  1,
+		op:      opError,
+	}
+	f.writeInt(int32(code))
+	f.writeString(msg)
+	return f
+}
+
+// ybErrorString builds the error string that this fork's errorFrame.Error()
+// produces. YugabyteDB gocql prefixes the CQL error code to the message (see
+// errorFrame.Error in errors.go), so the upstream expectations of a bare message
+// do not hold here.
+func ybErrorString(code int, msg string) string {
+	return fmt.Sprintf("code=%x; message=%s", code, msg)
+}
+
+func TestParseErrorFrameDedicatedTypes(t *testing.T) {
+	tests := []struct {
+		name    string
+		code    int
+		msg     string
+		assertT func(*testing.T, frame)
+	}{
+		{
+			name: "overloaded",
+			code: ErrCodeOverloaded,
+			msg:  "coordinator overloaded",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrOverloaded)
+				if !ok {
+					t.Fatalf("expected *RequestErrOverloaded, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeOverloaded {
+					t.Fatalf("expected code %x, got %x", ErrCodeOverloaded, reqErr.Code())
+				}
+				if reqErr.Message() != "coordinator overloaded" {
+					t.Fatalf("expected message %q, got %q", "coordinator overloaded", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "coordinator overloaded"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+		{
+			name: "bootstrapping",
+			code: ErrCodeBootstrapping,
+			msg:  "node is bootstrapping",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrBootstrapping)
+				if !ok {
+					t.Fatalf("expected *RequestErrBootstrapping, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeBootstrapping {
+					t.Fatalf("expected code %x, got %x", ErrCodeBootstrapping, reqErr.Code())
+				}
+				if reqErr.Message() != "node is bootstrapping" {
+					t.Fatalf("expected message %q, got %q", "node is bootstrapping", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "node is bootstrapping"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+		{
+			name: "invalid",
+			code: ErrCodeInvalid,
+			msg:  "invalid query",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrInvalid)
+				if !ok {
+					t.Fatalf("expected *RequestErrInvalid, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeInvalid {
+					t.Fatalf("expected code %x, got %x", ErrCodeInvalid, reqErr.Code())
+				}
+				if reqErr.Message() != "invalid query" {
+					t.Fatalf("expected message %q, got %q", "invalid query", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "invalid query"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+		{
+			name: "config",
+			code: ErrCodeConfig,
+			msg:  "configuration error",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrConfig)
+				if !ok {
+					t.Fatalf("expected *RequestErrConfig, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeConfig {
+					t.Fatalf("expected code %x, got %x", ErrCodeConfig, reqErr.Code())
+				}
+				if reqErr.Message() != "configuration error" {
+					t.Fatalf("expected message %q, got %q", "configuration error", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "configuration error"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+		{
+			name: "credentials",
+			code: ErrCodeCredentials,
+			msg:  "bad credentials",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrCredentials)
+				if !ok {
+					t.Fatalf("expected *RequestErrCredentials, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeCredentials {
+					t.Fatalf("expected code %x, got %x", ErrCodeCredentials, reqErr.Code())
+				}
+				if reqErr.Message() != "bad credentials" {
+					t.Fatalf("expected message %q, got %q", "bad credentials", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "bad credentials"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+		{
+			name: "syntax",
+			code: ErrCodeSyntax,
+			msg:  "syntax error",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrSyntax)
+				if !ok {
+					t.Fatalf("expected *RequestErrSyntax, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeSyntax {
+					t.Fatalf("expected code %x, got %x", ErrCodeSyntax, reqErr.Code())
+				}
+				if reqErr.Message() != "syntax error" {
+					t.Fatalf("expected message %q, got %q", "syntax error", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "syntax error"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+		{
+			name: "truncate",
+			code: ErrCodeTruncate,
+			msg:  "truncation error",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrTruncate)
+				if !ok {
+					t.Fatalf("expected *RequestErrTruncate, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeTruncate {
+					t.Fatalf("expected code %x, got %x", ErrCodeTruncate, reqErr.Code())
+				}
+				if reqErr.Message() != "truncation error" {
+					t.Fatalf("expected message %q, got %q", "truncation error", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "truncation error"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+		{
+			name: "unauthorized",
+			code: ErrCodeUnauthorized,
+			msg:  "unauthorized",
+			assertT: func(t *testing.T, got frame) {
+				reqErr, ok := got.(*RequestErrUnauthorized)
+				if !ok {
+					t.Fatalf("expected *RequestErrUnauthorized, got %T", got)
+				}
+				if reqErr.Code() != ErrCodeUnauthorized {
+					t.Fatalf("expected code %x, got %x", ErrCodeUnauthorized, reqErr.Code())
+				}
+				if reqErr.Message() != "unauthorized" {
+					t.Fatalf("expected message %q, got %q", "unauthorized", reqErr.Message())
+				}
+				if want := ybErrorString(reqErr.Code(), "unauthorized"); reqErr.Error() != want {
+					t.Fatalf("expected error string %q, got %q", want, reqErr.Error())
+				}
+				if reqErr.Header().op != opError {
+					t.Fatalf("expected op %v, got %v", opError, reqErr.Header().op)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newErrorFrameForTest(tt.code, tt.msg)
+
+			got, err := f.parseErrorFrame()
+			if err != nil {
+				t.Fatalf("parseErrorFrame returned error: %v", err)
+			}
+
+			tt.assertT(t, got)
+		})
+	}
+}
+
+func TestParseErrorFrameAllGenericCodes(t *testing.T) {
+	codes := []struct {
+		name string
+		code int
+	}{
+		{"overloaded", ErrCodeOverloaded},
+		{"bootstrapping", ErrCodeBootstrapping},
+		{"invalid", ErrCodeInvalid},
+		{"config", ErrCodeConfig},
+		{"credentials", ErrCodeCredentials},
+		{"syntax", ErrCodeSyntax},
+		{"truncate", ErrCodeTruncate},
+		{"unauthorized", ErrCodeUnauthorized},
+	}
+
+	for _, tc := range codes {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newErrorFrameForTest(tc.code, "test message")
+
+			got, err := f.parseErrorFrame()
+			if err != nil {
+				t.Fatalf("parseErrorFrame returned error: %v", err)
+			}
+
+			reqErr, ok := got.(RequestError)
+			if !ok {
+				t.Fatalf("expected RequestError, got %T", got)
+			}
+			if reqErr.Code() != tc.code {
+				t.Fatalf("expected code %x, got %x", tc.code, reqErr.Code())
+			}
+		})
 	}
 }

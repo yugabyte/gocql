@@ -7,6 +7,10 @@ Documentation: [Getting started guide](https://docs.yugabyte.com/preview/drivers
 
 Discussions: https://www.yugabyte.com/slack
 
+This fork tracks the upstream Apache Cassandra GoCQL driver, currently at
+[v2.1.2](https://github.com/apache/cassandra-gocql-driver). Version `2.0.0` of upstream introduced
+breaking API changes; see the [upgrade guide](UPGRADE_GUIDE.md) for migrating from `1.x`.
+
 Supported Versions
 ------------------
 
@@ -28,7 +32,21 @@ In general, the gocql team will focus on supporting the current and previous ver
 Installation
 ------------
 
-    go get github.com/yugabyte/gocql
+    go get github.com/yugabyte/gocql/v2
+
+The import path carries the `/v2` suffix, as Go requires for a module at major
+version 2 or above. Upgrading from `v1.6.0-yb-1` is not a version bump: because
+`github.com/yugabyte/gocql` and `github.com/yugabyte/gocql/v2` are distinct
+modules, `go get -u` will not move you across, and every import of the driver has
+to be updated:
+
+```diff
+-import "github.com/yugabyte/gocql"
++import "github.com/yugabyte/gocql/v2"
+```
+
+Types from the two do not interoperate, so any code with a `*gocql.Session` in
+its signature must be updated in the same change.
 
 
 Features
@@ -122,7 +140,7 @@ import (
 	"fmt"
 	"log"
 
-	"github.com/yugabyte/gocql"
+	"github.com/yugabyte/gocql/v2"
 )
 
 func main() {

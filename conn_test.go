@@ -1,8 +1,29 @@
-// Copyright (c) 2012 The gocql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
 //go:build all || unit
 // +build all unit
+
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2012, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
 
 package gocql
 
@@ -12,6 +33,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -19,33 +41,39 @@ import (
 	"math/rand"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/yugabyte/gocql/internal/streams"
+	"github.com/stretchr/testify/require"
+
+	"github.com/yugabyte/gocql/v2/internal/streams"
 )
 
 const (
-	defaultProto = protoVersion2
+	defaultProto = protoVersion4
 )
 
 func TestApprove(t *testing.T) {
 	tests := map[bool]bool{
-		approve("org.apache.cassandra.auth.PasswordAuthenticator", []string{}):                                          true,
-		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator", []string{}):                                 true,
-		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator", []string{}):                                         true,
-		approve("io.aiven.cassandra.auth.AivenAuthenticator", []string{}):                                               true,
-		approve("com.amazon.helenus.auth.HelenusAuthenticator", []string{}):                                             true,
-		approve("com.ericsson.bss.cassandra.ecaudit.auth.AuditAuthenticator", []string{}):                               true,
-		approve("com.scylladb.auth.SaslauthdAuthenticator", []string{}):                                                 true,
-		approve("com.scylladb.auth.TransitionalAuthenticator", []string{}):                                              true,
-		approve("com.instaclustr.cassandra.auth.InstaclustrPasswordAuthenticator", []string{}):                          true,
-		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{}):                                              false,
-		approve("com.apache.cassandra.auth.FakeAuthenticator", nil):                                                     false,
-		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{"com.apache.cassandra.auth.FakeAuthenticator"}): true,
+		approve("org.apache.cassandra.auth.PasswordAuthenticator", []string{}):                                             true,
+		approve("org.apache.cassandra.auth.MutualTlsWithPasswordFallbackAuthenticator", []string{}):                        true,
+		approve("org.apache.cassandra.auth.MutualTlsAuthenticator", []string{}):                                            true,
+		approve("com.instaclustr.cassandra.auth.SharedSecretAuthenticator", []string{}):                                    true,
+		approve("com.datastax.bdp.cassandra.auth.DseAuthenticator", []string{}):                                            true,
+		approve("io.aiven.cassandra.auth.AivenAuthenticator", []string{}):                                                  true,
+		approve("com.amazon.helenus.auth.HelenusAuthenticator", []string{}):                                                true,
+		approve("com.ericsson.bss.cassandra.ecaudit.auth.AuditAuthenticator", []string{}):                                  true,
+		approve("com.scylladb.auth.SaslauthdAuthenticator", []string{}):                                                    true,
+		approve("com.scylladb.auth.TransitionalAuthenticator", []string{}):                                                 true,
+		approve("com.instaclustr.cassandra.auth.InstaclustrPasswordAuthenticator", []string{}):                             true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{}):                                                 true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", nil):                                                        true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{"com.apache.cassandra.auth.FakeAuthenticator"}):    true,
+		approve("com.apache.cassandra.auth.FakeAuthenticator", []string{"com.apache.cassandra.auth.NotFakeAuthenticator"}): false,
 	}
 	for k, v := range tests {
 		if k != v {
@@ -72,6 +100,12 @@ func testCluster(proto protoVersion, addresses ...string) *ClusterConfig {
 	cluster := NewCluster(addresses...)
 	cluster.ProtoVersion = int(proto)
 	cluster.disableControlConn = true
+	// gocql-yb: these are upstream protocol tests running against a mock server,
+	// not tests of YugabyteDB routing. Session defaults HostSelectionPolicy to
+	// YBPartitionAwareHostPolicy, whose Pick resolves routing metadata and so
+	// issues an extra PREPARE -- which changes the frames these tests count.
+	// Pin the upstream policy so they observe only the traffic they are asserting on.
+	cluster.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
 	return cluster
 }
 
@@ -157,7 +191,7 @@ func newTestSession(proto protoVersion, addresses ...string) (*Session, error) {
 }
 
 func TestDNSLookupConnected(t *testing.T) {
-	log := &testLogger{}
+	log := newTestLogger(LogLevelDebug)
 
 	// Override the defaul DNS resolver and restore at the end
 	failDNS = true
@@ -178,13 +212,13 @@ func TestDNSLookupConnected(t *testing.T) {
 		t.Fatal("CreateSession() should have connected")
 	}
 
-	if !strings.Contains(log.String(), "gocql: dns error") {
+	if !strings.Contains(log.String(), "gocql: DNS error") {
 		t.Fatalf("Expected to receive dns error log message  - got '%s' instead", log.String())
 	}
 }
 
 func TestDNSLookupError(t *testing.T) {
-	log := &testLogger{}
+	log := newTestLogger(LogLevelDebug)
 
 	// Override the defaul DNS resolver and restore at the end
 	failDNS = true
@@ -202,7 +236,7 @@ func TestDNSLookupError(t *testing.T) {
 		t.Fatal("CreateSession() should have returned an error")
 	}
 
-	if !strings.Contains(log.String(), "gocql: dns error") {
+	if !strings.Contains(log.String(), "gocql: DNS error") {
 		t.Fatalf("Expected to receive dns error log message  - got '%s' instead", log.String())
 	}
 
@@ -213,7 +247,7 @@ func TestDNSLookupError(t *testing.T) {
 
 func TestStartupTimeout(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	log := &testLogger{}
+	log := newTestLogger(LogLevelDebug)
 
 	srv := NewTestServer(t, defaultProto, ctx)
 	defer srv.Stop()
@@ -259,7 +293,9 @@ func TestTimeout(t *testing.T) {
 	srv := NewTestServer(t, defaultProto, ctx)
 	defer srv.Stop()
 
-	db, err := newTestSession(defaultProto, srv.Address)
+	cluster := testCluster(defaultProto, srv.Address)
+	cluster.Timeout = 2 * time.Second
+	db, err := cluster.CreateSession()
 	if err != nil {
 		t.Fatalf("NewCluster: %v", err)
 	}
@@ -278,12 +314,18 @@ func TestTimeout(t *testing.T) {
 		}
 	}()
 
-	if err := db.Query("kill").WithContext(ctx).Exec(); err == nil {
+	now := time.Now()
+	err = db.Query("timeout").ExecContext(ctx)
+	if err == nil {
 		t.Fatal("expected error got nil")
 	}
 	cancel()
-
 	wg.Wait()
+
+	elapsed := time.Since(now)
+	if elapsed < 1*time.Second || elapsed > 4*time.Second {
+		t.Fatalf("timeout is not respected (took %v)", elapsed.String())
+	}
 }
 
 func TestCancel(t *testing.T) {
@@ -301,37 +343,38 @@ func TestCancel(t *testing.T) {
 	}
 	defer db.Close()
 
-	qry := db.Query("timeout").WithContext(ctx)
-
 	// Make sure we finish the query without leftovers
 	var wg sync.WaitGroup
 	wg.Add(1)
-
 	go func() {
-		if err := qry.Exec(); err != context.Canceled {
-			t.Fatalf("expected to get context cancel error: '%v', got '%v'", context.Canceled, err)
-		}
+		err = db.Query("timeout").ExecContext(ctx)
 		wg.Done()
 	}()
 
 	// The query will timeout after about 1 seconds, so cancel it after a short pause
 	time.AfterFunc(20*time.Millisecond, cancel)
 	wg.Wait()
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected to get context cancel error: '%v', got '%v'", context.Canceled, err)
+	}
 }
 
 type testQueryObserver struct {
 	metrics map[string]*hostMetrics
-	verbose bool
-	logger  StdLogger
+	logger  StructuredLogger
 }
 
 func (o *testQueryObserver) ObserveQuery(ctx context.Context, q ObservedQuery) {
 	host := q.Host.ConnectAddress().String()
 	o.metrics[host] = q.Metrics
-	if o.verbose {
-		o.logger.Printf("Observed query %q. Returned %v rows, took %v on host %q with %v attempts and total latency %v. Error: %q\n",
-			q.Statement, q.Rows, q.End.Sub(q.Start), host, q.Metrics.Attempts, q.Metrics.TotalLatency, q.Err)
-	}
+	o.logger.Debug("Observed query.",
+		NewLogFieldString("stmt", q.Statement),
+		NewLogFieldInt("rows", q.Rows),
+		NewLogFieldString("duration", q.End.Sub(q.Start).String()),
+		NewLogFieldString("host", host),
+		NewLogFieldInt("attempts", q.Metrics.Attempts),
+		NewLogFieldString("latency", strconv.FormatInt(q.Metrics.TotalLatency, 10)),
+		NewLogFieldError("err", q.Err))
 }
 
 func (o *testQueryObserver) GetMetrics(host *HostInfo) *hostMetrics {
@@ -365,12 +408,14 @@ func TestQueryRetry(t *testing.T) {
 	rt := &SimpleRetryPolicy{NumRetries: 1}
 
 	qry := db.Query("kill").RetryPolicy(rt)
-	if err := qry.Exec(); err == nil {
+	iter := qry.Iter()
+	err = iter.Close()
+	if err == nil {
 		t.Fatalf("expected error")
 	}
 
 	requests := atomic.LoadInt64(&srv.nKillReq)
-	attempts := qry.Attempts()
+	attempts := iter.Attempts()
 	if requests != int64(attempts) {
 		t.Fatalf("expected requests %v to match query attempts %v", requests, attempts)
 	}
@@ -382,7 +427,7 @@ func TestQueryRetry(t *testing.T) {
 }
 
 func TestQueryMultinodeWithMetrics(t *testing.T) {
-	log := &testLogger{}
+	log := newTestLogger(LogLevelNone)
 	defer func() {
 		os.Stdout.WriteString(log.String())
 	}()
@@ -410,35 +455,37 @@ func TestQueryMultinodeWithMetrics(t *testing.T) {
 
 	// 1 retry per host
 	rt := &SimpleRetryPolicy{NumRetries: 3}
-	observer := &testQueryObserver{metrics: make(map[string]*hostMetrics), verbose: false, logger: log}
-	qry := db.Query("kill").RetryPolicy(rt).Observer(observer)
-	if err := qry.Exec(); err == nil {
+	observer := &testQueryObserver{metrics: make(map[string]*hostMetrics), logger: log}
+	qry := db.Query("kill").RetryPolicy(rt).Observer(observer).Idempotent(true)
+	iter := qry.Iter()
+	err = iter.Close()
+	if err == nil {
 		t.Fatalf("expected error")
 	}
+	totalLatency := int64(0)
+	totalAttempts := int64(0)
 
 	for i, ip := range addresses {
 		host := &HostInfo{connectAddress: net.ParseIP(ip)}
-		queryMetric := qry.metrics.hostMetrics(host)
 		observedMetrics := observer.GetMetrics(host)
-
 		requests := int(atomic.LoadInt64(&nodes[i].nKillReq))
-		hostAttempts := queryMetric.Attempts
-		if requests != hostAttempts {
-			t.Fatalf("expected requests %v to match query attempts %v", requests, hostAttempts)
+
+		if requests != observedMetrics.Attempts {
+			t.Fatalf("expected observed attempts %v to match server requests %v on host %v", observedMetrics.Attempts, requests, ip)
 		}
 
-		if hostAttempts != observedMetrics.Attempts {
-			t.Fatalf("expected observed attempts %v to match query attempts %v on host %v", observedMetrics.Attempts, hostAttempts, ip)
-		}
-
-		hostLatency := queryMetric.TotalLatency
 		observedLatency := observedMetrics.TotalLatency
-		if hostLatency != observedLatency {
-			t.Fatalf("expected observed latency %v to match query latency %v on host %v", observedLatency, hostLatency, ip)
-		}
+		totalLatency += observedLatency
+		totalAttempts += int64(observedMetrics.Attempts)
 	}
+
+	observedLatency := totalLatency / totalAttempts
+	if observedLatency != iter.Latency() {
+		t.Fatalf("expected observed latency %v (%v/%v) to match query latency %v", observedLatency, totalLatency, totalAttempts, iter.Latency())
+	}
+
 	// the query will only be attempted once, but is being retried
-	attempts := qry.Attempts()
+	attempts := iter.Attempts()
 	if attempts != rt.NumRetries {
 		t.Fatalf("failed to retry the query %v time(s). Query executed %v times", rt.NumRetries, attempts)
 	}
@@ -457,7 +504,7 @@ func (t *testRetryPolicy) GetRetryType(err error) RetryType {
 }
 
 func TestSpeculativeExecution(t *testing.T) {
-	log := &testLogger{}
+	log := newTestLogger(LogLevelDebug)
 	defer func() {
 		os.Stdout.WriteString(log.String())
 	}()
@@ -674,7 +721,7 @@ func TestStream0(t *testing.T) {
 	const expErr = "gocql: received unexpected frame on stream 0"
 
 	var buf bytes.Buffer
-	f := newFramer(nil, protoVersion4)
+	f := newFramer(nil, protoVersion4, GlobalTypes)
 	f.writeHeader(0, opResult, 0)
 	f.writeInt(resultKindVoid)
 	f.buf[0] |= 0x80
@@ -685,13 +732,23 @@ func TestStream0(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
 	conn := &Conn{
-		r:       bufio.NewReader(&buf),
+		r: &connReader{
+			r:    bufio.NewReader(&buf),
+			conn: clientConn,
+		},
 		streams: streams.New(protoVersion4),
-		logger:  &defaultLogger{},
+		session: &Session{
+			types: GlobalTypes,
+		},
+		logger: NewLogger(LogLevelNone),
 	}
 
-	err := conn.recv(context.Background())
+	err := conn.recv(context.Background(), false)
 	if err == nil {
 		t.Fatal("expected to get an error on stream 0")
 	} else if !strings.HasPrefix(err.Error(), expErr) {
@@ -928,6 +985,35 @@ func TestWriteCoalescing_WriteAfterClose(t *testing.T) {
 	}
 }
 
+func TestSkipMetadata(t *testing.T) {
+	// The YugabyteDB fork forces skipMeta off in Conn.executeQuery, to work around
+	// incorrect PREPARE-response metadata in YCQL
+	// (https://github.com/yugabyte/yugabyte-db/issues/1312), so the driver never
+	// sets flagSkipMetaData and this test's "select nometadata" path is
+	// unreachable. Re-enable together with that workaround.
+	t.Skip("gocql-yb: skipMeta is forced off; see yugabyte-db#1312 workaround in conn.go")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv := NewTestServer(t, protoVersion4, ctx)
+	defer srv.Stop()
+
+	db, err := newTestSession(protoVersion4, srv.Address)
+	if err != nil {
+		t.Fatalf("NewCluster: %v", err)
+	}
+	defer db.Close()
+
+	if err := db.Query("select nometadata").Exec(); err != nil {
+		t.Fatalf("expected no error got: %v", err)
+	}
+
+	if err := db.Query("select metadata").Exec(); err != nil {
+		t.Fatalf("expected no error got: %v", err)
+	}
+}
+
 type recordingFrameHeaderObserver struct {
 	t      *testing.T
 	mu     sync.Mutex
@@ -992,6 +1078,9 @@ type newTestServerOpts struct {
 	addr     string
 	protocol uint8
 	recvHook func(*framer)
+
+	customRequestHandler       func(srv *TestServer, reqFrame, respFrame *framer) error
+	dontFailOnProtocolMismatch bool
 }
 
 func (nts newTestServerOpts) newServer(t testing.TB, ctx context.Context) *TestServer {
@@ -1005,22 +1094,20 @@ func (nts newTestServerOpts) newServer(t testing.TB, ctx context.Context) *TestS
 		t.Fatal(err)
 	}
 
-	headerSize := 8
-	if nts.protocol > protoVersion2 {
-		headerSize = 9
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	srv := &TestServer{
 		Address:    listen.Addr().String(),
 		listen:     listen,
 		t:          t,
 		protocol:   nts.protocol,
-		headerSize: headerSize,
+		headerSize: 9,
 		ctx:        ctx,
 		cancel:     cancel,
 
 		onRecv: nts.recvHook,
+
+		customRequestHandler:       nts.customRequestHandler,
+		dontFailOnProtocolMismatch: nts.dontFailOnProtocolMismatch,
 	}
 
 	go srv.closeWatch()
@@ -1052,18 +1139,13 @@ func NewSSLTestServer(t testing.TB, protocol uint8, ctx context.Context) *TestSe
 		t.Fatal(err)
 	}
 
-	headerSize := 8
-	if protocol > protoVersion2 {
-		headerSize = 9
-	}
-
 	ctx, cancel := context.WithCancel(ctx)
 	srv := &TestServer{
 		Address:    listen.Addr().String(),
 		listen:     listen,
 		t:          t,
 		protocol:   protocol,
-		headerSize: headerSize,
+		headerSize: 9,
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -1090,6 +1172,10 @@ type TestServer struct {
 
 	// onRecv is a hook point for tests, called in receive loop.
 	onRecv func(*framer)
+
+	// customRequestHandler allows overriding the default request handling for testing purposes.
+	customRequestHandler       func(srv *TestServer, reqFrame, respFrame *framer) error
+	dontFailOnProtocolMismatch bool
 }
 
 func (srv *TestServer) closeWatch() {
@@ -1110,9 +1196,26 @@ func (srv *TestServer) serve() {
 		}
 
 		go func(conn net.Conn) {
+			var startupCompleted bool
+			var useProtoV5 bool
+
 			defer conn.Close()
 			for !srv.isClosed() {
-				framer, err := srv.readFrame(conn)
+				var reader io.Reader = conn
+
+				if useProtoV5 && startupCompleted {
+					frame, _, err := readUncompressedSegment(conn)
+					if err != nil {
+						if errors.Is(err, io.EOF) {
+							return
+						}
+						srv.errorLocked(err)
+						return
+					}
+					reader = bytes.NewReader(frame)
+				}
+
+				framer, err := srv.readFrame(reader)
 				if err != nil {
 					if err == io.EOF {
 						return
@@ -1125,7 +1228,7 @@ func (srv *TestServer) serve() {
 					srv.onRecv(framer)
 				}
 
-				go srv.process(conn, framer)
+				srv.process(conn, framer, &useProtoV5, &startupCompleted)
 			}
 		}(conn)
 	}
@@ -1163,13 +1266,22 @@ func (srv *TestServer) errorLocked(err interface{}) {
 	srv.t.Error(err)
 }
 
-func (srv *TestServer) process(conn net.Conn, reqFrame *framer) {
+func (srv *TestServer) process(conn net.Conn, reqFrame *framer, useProtoV5, startupCompleted *bool) {
 	head := reqFrame.header
 	if head == nil {
 		srv.errorLocked("process frame with a nil header")
 		return
 	}
-	respFrame := newFramer(nil, reqFrame.proto)
+	respFrame := newFramer(nil, byte(head.version), GlobalTypes)
+
+	if srv.customRequestHandler != nil {
+		if err := srv.customRequestHandler(srv, reqFrame, respFrame); err != nil {
+			srv.errorLocked(err)
+			return
+		}
+		// Dont like this but...
+		goto finish
+	}
 
 	switch head.op {
 	case opStartup:
@@ -1186,7 +1298,11 @@ func (srv *TestServer) process(conn net.Conn, reqFrame *framer) {
 		respFrame.writeHeader(0, opSupported, head.stream)
 		respFrame.writeShort(0)
 	case opQuery:
-		query := reqFrame.readLongString()
+		query, err := reqFrame.readLongString()
+		if err != nil {
+			srv.errorLocked(err)
+			return
+		}
 		first := query
 		if n := strings.Index(query, " "); n > 0 {
 			first = first[:n]
@@ -1240,32 +1356,162 @@ func (srv *TestServer) process(conn net.Conn, reqFrame *framer) {
 	case opError:
 		respFrame.writeHeader(0, opError, head.stream)
 		respFrame.buf = append(respFrame.buf, reqFrame.buf...)
+	case opPrepare:
+		query, err := reqFrame.readLongString()
+		if err != nil {
+			srv.errorLocked(err)
+			return
+		}
+		name := strings.TrimPrefix(query, "select ")
+		if n := strings.Index(name, " "); n > 0 {
+			name = name[:n]
+		}
+		switch strings.ToLower(name) {
+		case "nometadata":
+			respFrame.writeHeader(0, opResult, head.stream)
+			respFrame.writeInt(resultKindPrepared)
+			// <id>
+			respFrame.writeShortBytes(binary.BigEndian.AppendUint64(nil, 1))
+			// <metadata>
+			respFrame.writeInt(0) // <flags>
+			respFrame.writeInt(0) // <columns_count>
+			if srv.protocol >= protoVersion4 {
+				respFrame.writeInt(0) // <pk_count>
+			}
+			// <result_metadata>
+			respFrame.writeInt(int32(flagNoMetaData)) // <flags>
+			respFrame.writeInt(0)
+		case "metadata":
+			respFrame.writeHeader(0, opResult, head.stream)
+			respFrame.writeInt(resultKindPrepared)
+			// <id>
+			respFrame.writeShortBytes(binary.BigEndian.AppendUint64(nil, 2))
+			// <metadata>
+			respFrame.writeInt(0) // <flags>
+			respFrame.writeInt(0) // <columns_count>
+			if srv.protocol >= protoVersion4 {
+				respFrame.writeInt(0) // <pk_count>
+			}
+			// <result_metadata>
+			respFrame.writeInt(int32(flagGlobalTableSpec)) // <flags>
+			respFrame.writeInt(1)                          // <columns_count>
+			// <global_table_spec>
+			respFrame.writeString("keyspace")
+			respFrame.writeString("table")
+			// <col_spec_0>
+			respFrame.writeString("col0")             // <name>
+			respFrame.writeShort(uint16(TypeBoolean)) // <type>
+		default:
+			respFrame.writeHeader(0, opError, head.stream)
+			respFrame.writeInt(0)
+			respFrame.writeString("unsupported query: " + name)
+		}
+	case opExecute:
+		b, err := reqFrame.readShortBytes()
+		if err != nil {
+			srv.errorLocked(err)
+			return
+		}
+		id := binary.BigEndian.Uint64(b)
+		// <query_parameters>
+		reqFrame.readConsistency() // <consistency>
+		var flags uint32
+		if srv.protocol > protoVersion4 {
+			ui, err := reqFrame.readInt()
+			if err != nil {
+				srv.errorLocked(err)
+				return
+			}
+			flags = uint32(ui)
+		} else {
+			b, err := reqFrame.readByte()
+			if err != nil {
+				srv.errorLocked(err)
+				return
+			}
+			flags = uint32(b)
+		}
+		switch id {
+		case 1:
+			if flags&flagSkipMetaData != 0 {
+				respFrame.writeHeader(0, opError, head.stream)
+				respFrame.writeInt(0)
+				respFrame.writeString("skip metadata unexpected")
+			} else {
+				respFrame.writeHeader(0, opResult, head.stream)
+				respFrame.writeInt(resultKindRows)
+				// <metadata>
+				respFrame.writeInt(0) // <flags>
+				respFrame.writeInt(0) // <columns_count>
+				// <rows_count>
+				respFrame.writeInt(0)
+			}
+		case 2:
+			if flags&flagSkipMetaData != 0 {
+				respFrame.writeHeader(0, opResult, head.stream)
+				respFrame.writeInt(resultKindRows)
+				// <metadata>
+				respFrame.writeInt(0) // <flags>
+				respFrame.writeInt(0) // <columns_count>
+				// <rows_count>
+				respFrame.writeInt(0)
+			} else {
+				respFrame.writeHeader(0, opError, head.stream)
+				respFrame.writeInt(0)
+				respFrame.writeString("skip metadata expected")
+			}
+		default:
+			respFrame.writeHeader(0, opError, head.stream)
+			respFrame.writeInt(ErrCodeUnprepared)
+			respFrame.writeString("unprepared")
+			respFrame.writeShortBytes(binary.BigEndian.AppendUint64(nil, id))
+		}
 	default:
 		respFrame.writeHeader(0, opError, head.stream)
 		respFrame.writeInt(0)
 		respFrame.writeString("not supported")
 	}
 
-	respFrame.buf[0] = srv.protocol | 0x80
+finish:
+
+	respFrame.buf[0] |= 0x80
 
 	if err := respFrame.finish(); err != nil {
 		srv.errorLocked(err)
 	}
 
-	if err := respFrame.writeTo(conn); err != nil {
-		srv.errorLocked(err)
+	if *useProtoV5 && *startupCompleted {
+		segment, err := newUncompressedSegment(respFrame.buf, true)
+		if err == nil {
+			_, err = conn.Write(segment)
+		}
+		if err != nil {
+			srv.errorLocked(err)
+			return
+		}
+	} else {
+		if err := respFrame.writeTo(conn); err != nil {
+			srv.errorLocked(err)
+		}
+
+		if reqFrame.header.op == opStartup {
+			*startupCompleted = true
+			if head.version == protoVersion5 {
+				*useProtoV5 = true
+			}
+		}
 	}
 }
 
-func (srv *TestServer) readFrame(conn net.Conn) (*framer, error) {
+func (srv *TestServer) readFrame(reader io.Reader) (*framer, error) {
 	buf := make([]byte, srv.headerSize)
-	head, err := readHeader(conn, buf)
+	head, err := readHeader(reader, buf)
 	if err != nil {
 		return nil, err
 	}
-	framer := newFramer(nil, srv.protocol)
+	framer := newFramer(nil, srv.protocol, GlobalTypes)
 
-	err = framer.readFrame(conn, &head)
+	err = framer.readFrame(reader, &head)
 	if err != nil {
 		return nil, err
 	}
@@ -1273,9 +1519,105 @@ func (srv *TestServer) readFrame(conn net.Conn) (*framer, error) {
 	// should be a request frame
 	if head.version.response() {
 		return nil, fmt.Errorf("expected to read a request frame got version: %v", head.version)
-	} else if head.version.version() != srv.protocol {
+	} else if !srv.dontFailOnProtocolMismatch && head.version.version() != srv.protocol {
 		return nil, fmt.Errorf("expected to read protocol version 0x%x got 0x%x", srv.protocol, head.version.version())
 	}
 
 	return framer, nil
+}
+
+func TestConnProcessAllFramesInSingleSegment(t *testing.T) {
+	server, client, err := tcpConnPair()
+	require.NoError(t, err)
+
+	c := &Conn{
+		r: &connReader{
+			conn: server,
+			r:    bufio.NewReader(server),
+		},
+		calls:      make(map[int]*callReq),
+		version:    protoVersion5,
+		addr:       server.RemoteAddr().String(),
+		streams:    streams.New(protoVersion5),
+		isSchemaV2: true,
+		w: &deadlineContextWriter{
+			w:         server,
+			timeout:   time.Second * 10,
+			semaphore: make(chan struct{}, 1),
+			quit:      make(chan struct{}),
+		},
+		writeTimeout: time.Second * 10,
+		session:      &Session{types: GlobalTypes},
+		logger:       &defaultLogger{},
+	}
+
+	call1 := &callReq{
+		timeout:  make(chan struct{}),
+		streamID: 1,
+		resp:     make(chan callResp),
+	}
+
+	call2 := &callReq{
+		timeout:  make(chan struct{}),
+		streamID: 2,
+		resp:     make(chan callResp),
+	}
+
+	c.calls[1] = call1
+	c.calls[2] = call2
+
+	req := writeQueryFrame{
+		statement: "SELECT * FROM system.local",
+		params: queryParams{
+			consistency: Quorum,
+			keyspace:    "gocql_test",
+		},
+	}
+
+	framer1 := newFramer(nil, protoVersion5, GlobalTypes)
+	err = req.buildFrame(framer1, 1)
+	require.NoError(t, err)
+
+	framer2 := newFramer(nil, protoVersion5, GlobalTypes)
+	err = req.buildFrame(framer2, 2)
+	require.NoError(t, err)
+
+	go func() {
+		var buf []byte
+		buf = append(buf, framer1.buf...)
+		buf = append(buf, framer2.buf...)
+
+		uncompressedSegment, err := newUncompressedSegment(buf, true)
+		require.NoError(t, err)
+
+		_, err = client.Write(uncompressedSegment)
+		require.NoError(t, err)
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- c.recvSegment(ctx)
+	}()
+
+	go func() {
+		resp1 := <-call1.resp
+		close(call1.timeout)
+		// Skipping here the header of the frame because resp.framer contains already parsed header
+		// and resp.framer.buf contains frame body
+		require.Equal(t, framer1.buf[9:], resp1.framer.buf)
+
+		resp2 := <-call2.resp
+		close(call2.timeout)
+		require.Equal(t, framer2.buf[9:], resp2.framer.buf)
+	}()
+
+	select {
+	case <-ctx.Done():
+		t.Fatal("Timed out waiting for frames")
+	case err := <-errCh:
+		require.NoError(t, err)
+	}
 }

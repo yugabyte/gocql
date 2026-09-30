@@ -1,6 +1,26 @@
-// Copyright (c) 2012 The gocql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2012, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
 
 package gocql
 
@@ -18,7 +38,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/yugabyte/gocql/internal/lru"
+	"github.com/yugabyte/gocql/v2/internal/lru"
 )
 
 // Session is the interface used by users to interact with the database.
@@ -31,20 +51,21 @@ import (
 // and automatically sets a default consistency level on all operations
 // that do not have a consistency level set.
 type Session struct {
-	cons                Consistency
-	pageSize            int
-	prefetch            float64
-	routingKeyInfoCache routingKeyInfoLRU
-	schemaDescriber     *schemaDescriber
-	trace               Tracer
-	queryObserver       QueryObserver
-	batchObserver       BatchObserver
-	connectObserver     ConnectObserver
-	frameObserver       FrameHeaderObserver
-	streamObserver      StreamObserver
-	hostSource          *ringDescriber
-	ringRefresher       *refreshDebouncer
-	stmtsLRU            *preparedLRU
+	cons                 Consistency
+	pageSize             int
+	prefetch             float64
+	routingMetadataCache routingKeyInfoLRU
+	schemaDescriber      *schemaDescriber
+	trace                Tracer
+	queryObserver        QueryObserver
+	batchObserver        BatchObserver
+	connectObserver      ConnectObserver
+	frameObserver        FrameHeaderObserver
+	streamObserver       StreamObserver
+	hostSource           *ringDescriber
+	ringRefresher        *refreshDebouncer
+	stmtsLRU             *preparedLRU
+	types                *RegisteredTypes
 
 	connCfg *ConnConfig
 
@@ -55,13 +76,19 @@ type Session struct {
 	ring     ring
 	metadata clusterMetadata
 
-	mu sync.RWMutex
-
 	control *controlConn
 
 	// event handlers
-	nodeEvents   *eventDebouncer
-	schemaEvents *eventDebouncer
+	nodeEvents *eventDebouncer
+
+	// host state and topology change listeners
+	hostListeners internalHostListeners
+
+	// schema change listeners
+	schemaListeners internalSchemaListeners
+
+	// session ready listeners
+	sessionReadyListeners internalSessionReadyListener
 
 	// ring metadata
 	useSystemSchema           bool
@@ -82,23 +109,17 @@ type Session struct {
 	// you can use initialized() to read the value.
 	isInitialized bool
 
-	logger StdLogger
+	logger StructuredLogger
 }
 
-var queryPool = &sync.Pool{
-	New: func() interface{} {
-		return &Query{routingInfo: &queryRoutingInfo{}, refCount: 1}
-	},
-}
-
-func addrsToHosts(addrs []string, defaultPort int, logger StdLogger) ([]*HostInfo, error) {
+func addrsToHosts(addrs []string, defaultPort int, logger StructuredLogger) ([]*HostInfo, error) {
 	var hosts []*HostInfo
 	for _, hostaddr := range addrs {
 		resolvedHosts, err := hostInfo(hostaddr, defaultPort)
 		if err != nil {
 			// Try other hosts if unable to resolve DNS name
 			if _, ok := err.(*net.DNSError); ok {
-				logger.Printf("gocql: dns error: %v\n", err)
+				logger.Error("DNS error.", NewLogFieldError("err", err))
 				continue
 			}
 			return nil, err
@@ -124,49 +145,79 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 		return nil, errors.New("Can't use both Authenticator and AuthProvider in cluster config.")
 	}
 
+	if cfg.SerialConsistency > 0 && !cfg.SerialConsistency.isSerial() {
+		return nil, fmt.Errorf("the default SerialConsistency level is not allowed to be anything else but SERIAL or LOCAL_SERIAL. Recived value: %v", cfg.SerialConsistency)
+	}
+
 	// TODO: we should take a context in here at some point
 	ctx, cancel := context.WithCancel(context.TODO())
 
 	s := &Session{
 		cons:            cfg.Consistency,
-		prefetch:        0.25,
+		prefetch:        cfg.NextPagePrefetch,
 		cfg:             cfg,
 		pageSize:        cfg.PageSize,
 		stmtsLRU:        &preparedLRU{lru: lru.New(cfg.MaxPreparedStmts)},
 		connectObserver: cfg.ConnectObserver,
 		ctx:             ctx,
 		cancel:          cancel,
-		logger:          cfg.logger(),
+		logger:          cfg.newLogger(),
+		trace:           cfg.Tracer,
+	}
+	if cfg.RegisteredTypes == nil {
+		s.types = GlobalTypes.Copy()
+	} else {
+		s.types = cfg.RegisteredTypes.Copy()
 	}
 
-	s.schemaDescriber = newSchemaDescriber(s)
+	s.schemaDescriber = newSchemaDescriber(s, newRefreshDebouncer(schemaRefreshDebounceTime, func() error {
+		// A schema change can create, split or move tablets, so the YugabyteDB
+		// partition map is refreshed with the schema metadata. This runs on the
+		// debounced path, as it did in 1.x, so the refresh happens after the
+		// cluster has settled rather than on the raw event.
+		defer s.hostSource.getClusterPartitionInfo()
+		return refreshSchemas(s)
+	}))
 
 	s.nodeEvents = newEventDebouncer("NodeEvents", s.handleNodeEvent, s.logger)
-	s.schemaEvents = newEventDebouncer("SchemaEvents", s.handleSchemaEvent, s.logger)
 
-	s.routingKeyInfoCache.lru = lru.New(cfg.MaxRoutingKeyInfo)
+	s.routingMetadataCache.lru = lru.New(cfg.MaxRoutingKeyInfo)
 
 	s.hostSource = &ringDescriber{session: s}
 	s.ringRefresher = newRefreshDebouncer(ringRefreshDebounceTime, func() error { return refreshRing(s.hostSource) })
-
-	if cfg.PoolConfig.HostSelectionPolicy == nil {
-		cfg.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
-	}
-	s.pool = cfg.PoolConfig.buildPool(s)
-
-	s.policy = cfg.PoolConfig.HostSelectionPolicy
-	s.policy.Init(s)
-
-	s.executor = &queryExecutor{
-		pool:   s.pool,
-		policy: cfg.PoolConfig.HostSelectionPolicy,
-	}
 
 	s.queryObserver = cfg.QueryObserver
 	s.batchObserver = cfg.BatchObserver
 	s.connectObserver = cfg.ConnectObserver
 	s.frameObserver = cfg.FrameHeaderObserver
 	s.streamObserver = cfg.StreamObserver
+
+	// Propagate node status, topology and schema change listeners
+	s.hostListeners = newInternalHostStateListeners(
+		s,
+		cfg.Metadata.HostListener.HostStateChangeListener,
+		cfg.Metadata.HostListener.TopologyChangeListener,
+	)
+
+	// Propagate schema change listeners
+	s.schemaListeners = newInternalSchemaChangeListeners(
+		cfg.Metadata.SchemaListener.KeyspaceChangeListener,
+		cfg.Metadata.SchemaListener.TableChangeListener,
+		cfg.Metadata.SchemaListener.UserTypeChangeListener,
+		cfg.Metadata.SchemaListener.FunctionChangeListener,
+		cfg.Metadata.SchemaListener.AggregateChangeListener,
+	)
+
+	if cfg.Metadata.CacheMode == Disabled && s.schemaListeners.hasSchemaChangeListeners() {
+		return nil, errors.New("Schema change listeners are not supported in Disabled metadata cache mode")
+	}
+
+	if cfg.Metadata.CacheMode == KeyspaceOnly && s.schemaListeners.hasNonKeyspaceSchemaChangeListeners() {
+		return nil, errors.New("Schema change listeners are not supported in KeyspaceOnly metadata cache mode")
+	}
+
+	// Propagate session ready listener
+	s.sessionReadyListeners = newInternalSessionReadyListener(cfg.Metadata.SessionReadyListener)
 
 	//Check the TLS Config before trying to connect to anything external
 	connCfg, err := connConfig(&s.cfg)
@@ -175,6 +226,21 @@ func NewSession(cfg ClusterConfig) (*Session, error) {
 		return nil, fmt.Errorf("gocql: unable to create session: %v", err)
 	}
 	s.connCfg = connCfg
+
+	if cfg.PoolConfig.HostSelectionPolicy == nil {
+		// YugabyteDB default: route by partition, falling back to round robin.
+		cfg.PoolConfig.HostSelectionPolicy = YBPartitionAwareHostPolicy(RoundRobinHostPolicy())
+	}
+	s.pool = cfg.PoolConfig.buildPool(s)
+	s.policy = cfg.PoolConfig.HostSelectionPolicy
+
+	// set the executor here in case the policy needs to execute queries in Init
+	s.executor = &queryExecutor{
+		pool:   s.pool,
+		policy: cfg.PoolConfig.HostSelectionPolicy,
+	}
+
+	s.policy.Init(s)
 
 	if err := s.init(); err != nil {
 		s.Close()
@@ -211,9 +277,10 @@ func (s *Session) init() error {
 			// TODO(zariel): we really only need this in 1 place
 			s.cfg.ProtoVersion = proto
 			s.connCfg.ProtoVersion = proto
+			s.logger.Info("Discovered protocol version.", NewLogFieldInt("protocol_version", proto))
 		}
 
-		if err := s.control.connect(hosts); err != nil {
+		if err := s.control.connect(hosts, true); err != nil {
 			return err
 		}
 
@@ -232,6 +299,9 @@ func (s *Session) init() error {
 			}
 
 			hosts = filteredHosts
+			s.logger.Info("Refreshed ring.", NewLogFieldString("ring", ringString(hosts)))
+		} else {
+			s.logger.Info("Not performing a ring refresh because DisableInitialHostLookup is true.")
 		}
 	}
 
@@ -241,7 +311,7 @@ func (s *Session) init() error {
 		// by internal logic.
 		// Associate random UUIDs here with all hosts missing this information.
 		if len(host.HostID()) == 0 {
-			host.SetHostID(MustRandomUUID().String())
+			host.setHostID(MustRandomUUID().String())
 		}
 	}
 
@@ -262,9 +332,13 @@ func (s *Session) init() error {
 	// again
 	atomic.AddInt64(&left, 1)
 	for _, host := range hostMap {
-		host := s.ring.addOrUpdate(host)
+		host, exists := s.ring.addOrUpdate(host)
 		if s.cfg.filterHost(host) {
 			continue
+		}
+		if !exists {
+			s.logger.Info("Adding host (session initialization).",
+				NewLogFieldIP("host_addr", host.ConnectAddress()), NewLogFieldString("host_id", host.HostID()))
 		}
 
 		atomic.AddInt64(&left, 1)
@@ -335,14 +409,23 @@ func (s *Session) init() error {
 
 	// Invoke KeyspaceChanged to let the policy cache the session keyspace
 	// parameters. This is used by tokenAwareHostPolicy to discover replicas.
-	if !s.cfg.disableControlConn && s.cfg.Keyspace != "" {
-		s.policy.KeyspaceChanged(KeyspaceUpdateEvent{Keyspace: s.cfg.Keyspace})
+	if !s.cfg.disableControlConn && s.schemaDescriber != nil {
+		err := s.schemaDescriber.refreshSchemaMetadata()
+		if err != nil {
+			s.logger.Warning("Failed to initialize schema metadata. "+
+				"Token-aware routing will fall back to the configured fallback policy. "+
+				"Attempts to retrieve keyspace metadata will fail with ErrKeyspaceDoesNotExist until schema refresh succeeds.",
+				NewLogFieldError("err", err))
+		}
 	}
 
 	s.sessionStateMu.Lock()
 	s.isInitialized = true
 	s.sessionStateMu.Unlock()
 
+	s.sessionReadyListeners.OnSessionReady(s)
+
+	s.logger.Info("Session initialized successfully.")
 	return nil
 }
 
@@ -357,7 +440,7 @@ func (s *Session) AwaitSchemaAgreement(ctx context.Context) error {
 		return errNoControl
 	}
 	return s.control.withConn(func(conn *Conn) *Iter {
-		return &Iter{err: conn.awaitSchemaAgreement(ctx)}
+		return newErrIter(conn.awaitSchemaAgreement(ctx), &queryMetrics{}, "", nil, nil)
 	}).err
 }
 
@@ -368,21 +451,20 @@ func (s *Session) reconnectDownedHosts(intv time.Duration) {
 	for {
 		select {
 		case <-reconnectTicker.C:
+			s.logger.Debug("Connecting to downed hosts if there is any.")
 			hosts := s.ring.allHosts()
 
 			// Print session.ring for debug.
-			if gocqlDebug {
-				buf := bytes.NewBufferString("Session.ring:")
-				for _, h := range hosts {
-					buf.WriteString("[" + h.ConnectAddress().String() + ":" + h.State().String() + "]")
-				}
-				s.logger.Println(buf.String())
-			}
+			s.logger.Debug("Logging current ring state.", NewLogFieldString("ring", ringString(hosts)))
 
 			for _, h := range hosts {
 				if h.IsUp() {
 					continue
 				}
+				s.logger.Debug("Reconnecting to downed host.",
+					NewLogFieldIP("host_addr", h.ConnectAddress()),
+					NewLogFieldInt("host_port", h.Port()),
+					NewLogFieldString("host_id", h.HostID()))
 				// we let the pool call handleNodeConnected to change the host state
 				s.pool.addHost(h)
 			}
@@ -392,54 +474,64 @@ func (s *Session) reconnectDownedHosts(intv time.Duration) {
 	}
 }
 
-// SetConsistency sets the default consistency level for this session. This
-// setting can also be changed on a per-query basis and the default value
-// is Quorum.
-func (s *Session) SetConsistency(cons Consistency) {
-	s.mu.Lock()
-	s.cons = cons
-	s.mu.Unlock()
-}
-
-// SetPageSize sets the default page size for this session. A value <= 0 will
-// disable paging. This setting can also be changed on a per-query basis.
-func (s *Session) SetPageSize(n int) {
-	s.mu.Lock()
-	s.pageSize = n
-	s.mu.Unlock()
-}
-
-// SetPrefetch sets the default threshold for pre-fetching new pages. If
-// there are only p*pageSize rows remaining, the next page will be requested
-// automatically. This value can also be changed on a per-query basis and
-// the default value is 0.25.
-func (s *Session) SetPrefetch(p float64) {
-	s.mu.Lock()
-	s.prefetch = p
-	s.mu.Unlock()
-}
-
-// SetTrace sets the default tracer for this session. This setting can also
-// be changed on a per-query basis.
-func (s *Session) SetTrace(trace Tracer) {
-	s.mu.Lock()
-	s.trace = trace
-	s.mu.Unlock()
-}
-
 // Query generates a new query object for interacting with the database.
 // Further details of the query may be tweaked using the resulting query
 // value before the query is executed. Query is automatically prepared
 // if it has not previously been executed.
+//
+// Supported Go to CQL type conversions for query parameters are as follows:
+//
+//	Go type (value)             | CQL type                    | Note
+//	string, []byte              | varchar, ascii, blob, text  |
+//	bool                        | boolean                     |
+//	integer types               | tinyint, smallint, int      |
+//	string                      | tinyint, smallint, int      | formatted as base 10 number
+//	integer types               | bigint, counter             |
+//	big.Int                     | bigint, counter             | according to cassandra bigint specification the big.Int value limited to int64 size(an eight-byte two's complement integer.)
+//	string                      | bigint, counter             | formatted as base 10 number
+//	float32                     | float                       |
+//	float64                     | double                      |
+//	inf.Dec                     | decimal                     |
+//	int64                       | time                        | nanoseconds since start of day
+//	time.Duration               | time                        | duration since start of day
+//	int64                       | timestamp                   | milliseconds since Unix epoch
+//	time.Time                   | timestamp                   |
+//	slice, array                | list, set                   |
+//	map[X]struct{}              | list, set                   |
+//	map[X]Y                     | map                         |
+//	gocql.UUID                  | uuid, timeuuid              |
+//	[16]byte                    | uuid, timeuuid              | raw UUID bytes
+//	[]byte                      | uuid, timeuuid              | raw UUID bytes, length must be 16 bytes
+//	string                      | uuid, timeuuid              | hex representation, see ParseUUID
+//	integer types               | varint                      |
+//	big.Int                     | varint                      |
+//	string                      | varint                      | value of number in decimal notation
+//	net.IP                      | inet                        |
+//	string                      | inet                        | IPv4 or IPv6 address string
+//	slice, array                | tuple                       |
+//	struct                      | tuple                       | fields are marshaled in order of declaration
+//	gocql.UDTMarshaler          | user-defined type           | MarshalUDT is called
+//	map[string]interface{}      | user-defined type           |
+//	struct                      | user-defined type           | struct fields' cql tags are used for column names
+//	int64                       | date                        | milliseconds since Unix epoch to start of day (in UTC)
+//	time.Time                   | date                        | start of day (in UTC)
+//	string                      | date                        | parsed using "2006-01-02" format
+//	int64                       | duration                    | duration in nanoseconds
+//	time.Duration               | duration                    |
+//	gocql.Duration              | duration                    |
+//	string                      | duration                    | parsed with time.ParseDuration
 func (s *Session) Query(stmt string, values ...interface{}) *Query {
-	qry := queryPool.Get().(*Query)
+	qry := &Query{}
 	qry.session = s
 	qry.stmt = stmt
 	qry.values = values
+	qry.hostID = ""
 	qry.defaultsFromSession()
 	return qry
 }
 
+// QueryInfo represents metadata information about a prepared query.
+// It contains the query ID, argument information, result information, and primary key columns.
 type QueryInfo struct {
 	Id          []byte
 	Args        []ColumnInfo
@@ -453,8 +545,10 @@ type QueryInfo struct {
 // values will be marshalled as part of the query execution.
 // During execution, the meta data of the prepared query will be routed to the
 // binding callback, which is responsible for producing the query argument values.
+//
+// For supported Go to CQL type conversions for query parameters, see Session.Query documentation.
 func (s *Session) Bind(stmt string, b func(q *QueryInfo) ([]interface{}, error)) *Query {
-	qry := queryPool.Get().(*Query)
+	qry := &Query{}
 	qry.session = s
 	qry.stmt = stmt
 	qry.binding = b
@@ -478,16 +572,16 @@ func (s *Session) Close() {
 		s.pool.Close()
 	}
 
+	if s.schemaDescriber != nil {
+		s.schemaDescriber.schemaRefresher.stop()
+	}
+
 	if s.control != nil {
 		s.control.close()
 	}
 
 	if s.nodeEvents != nil {
 		s.nodeEvents.stop()
-	}
-
-	if s.schemaEvents != nil {
-		s.schemaEvents.stop()
 	}
 
 	if s.ringRefresher != nil {
@@ -517,15 +611,15 @@ func (s *Session) initialized() bool {
 	return initialized
 }
 
-func (s *Session) executeQuery(qry *Query) (it *Iter) {
+func (s *Session) executeQuery(qry *internalQuery) (it *Iter) {
 	// fail fast
 	if s.Closed() {
-		return &Iter{err: ErrSessionClosed}
+		return newErrIter(ErrSessionClosed, qry.metrics, qry.Keyspace(), qry.getRoutingInfo(), qry.getKeyspaceFunc())
 	}
 
 	iter, err := s.executor.executeQuery(qry)
 	if err != nil {
-		return &Iter{err: err}
+		return newErrIter(err, qry.metrics, qry.Keyspace(), qry.getRoutingInfo(), qry.getKeyspaceFunc())
 	}
 	if iter == nil {
 		panic("nil iter")
@@ -535,6 +629,7 @@ func (s *Session) executeQuery(qry *Query) (it *Iter) {
 }
 
 func (s *Session) removeHost(h *HostInfo) {
+	s.logger.Warning("Removing host.", NewLogFieldIP("host_addr", h.ConnectAddress()), NewLogFieldString("host_id", h.HostID()))
 	s.policy.RemoveHost(h)
 	hostID := h.HostID()
 	s.pool.removeHost(hostID)
@@ -542,6 +637,10 @@ func (s *Session) removeHost(h *HostInfo) {
 }
 
 // KeyspaceMetadata returns the schema metadata for the keyspace specified. Returns an error if the keyspace does not exist.
+// If MetadataConfig.CacheMode is Disabled this method will query the system tables,
+// otherwise it will retrieve the metadata from the driver's cache.
+//
+// Check AllKeyspaceMetadata if you're interested in retrieving the metadata for all keyspaces instead.
 func (s *Session) KeyspaceMetadata(keyspace string) (*KeyspaceMetadata, error) {
 	// fail fast
 	if s.Closed() {
@@ -553,8 +652,23 @@ func (s *Session) KeyspaceMetadata(keyspace string) (*KeyspaceMetadata, error) {
 	return s.schemaDescriber.getSchema(keyspace)
 }
 
+// AllKeyspaceMetadata returns the schema metadata for all keyspaces.
+// If MetadataConfig.CacheMode is Disabled this method will query the system tables,
+// otherwise it will retrieve the metadata from the driver's cache.
+//
+// Check KeyspaceMetadata if you're interested in retrieving the metadata for a single keyspace by name instead.
+func (s *Session) AllKeyspaceMetadata() (map[string]*KeyspaceMetadata, error) {
+	// fail fast
+	if s.Closed() {
+		return nil, ErrSessionClosed
+	}
+
+	return s.schemaDescriber.getAllSchema()
+}
+
 func (s *Session) getConn() *Conn {
 	hosts := s.ring.allHosts()
+
 	for _, host := range hosts {
 		if !host.IsUp() {
 			continue
@@ -571,14 +685,22 @@ func (s *Session) getConn() *Conn {
 	return nil
 }
 
-// returns routing key indexes and type info
-func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyInfo, error) {
-	s.routingKeyInfoCache.mu.Lock()
+// Returns statement metadata for the purposes of generating a routing key.
+// If keyspace == "" it uses the keyspace which is specified in Cluster.Keyspace
+func (s *Session) routingStatementMetadata(ctx context.Context, stmt string, keyspace string) (*StatementMetadata, error) {
+	if keyspace == "" {
+		keyspace = s.cfg.Keyspace
+	}
 
-	entry, cached := s.routingKeyInfoCache.lru.Get(stmt)
+	key := keyspace + stmt
+	s.routingMetadataCache.mu.Lock()
+
+	// Using here keyspace + stmt as a cache key because
+	// the query keyspace could be overridden via SetKeyspace
+	entry, cached := s.routingMetadataCache.lru.Get(key)
 	if cached {
 		// done accessing the cache
-		s.routingKeyInfoCache.mu.Unlock()
+		s.routingMetadataCache.mu.Unlock()
 		// the entry is an inflight struct similar to that used by
 		// Conn to prepare statements
 		inflight := entry.(*inflightCachedEntry)
@@ -590,7 +712,7 @@ func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyI
 			return nil, inflight.err
 		}
 
-		key, _ := inflight.value.(*routingKeyInfo)
+		key, _ := inflight.value.(*StatementMetadata)
 
 		return key, nil
 	}
@@ -599,153 +721,195 @@ func (s *Session) routingKeyInfo(ctx context.Context, stmt string) (*routingKeyI
 	inflight := new(inflightCachedEntry)
 	inflight.wg.Add(1)
 	defer inflight.wg.Done()
-	s.routingKeyInfoCache.lru.Add(stmt, inflight)
-	s.routingKeyInfoCache.mu.Unlock()
+	s.routingMetadataCache.lru.Add(key, inflight)
+	s.routingMetadataCache.mu.Unlock()
 
-	var (
-		info         *preparedStatment
-		partitionKey []*ColumnMetadata
-	)
+	var meta StatementMetadata
+	meta, inflight.err = s.StatementMetadata(ctx, stmt, keyspace)
+	if inflight.err != nil {
+		// don't cache this error
+		s.routingMetadataCache.Remove(key)
+		return nil, inflight.err
+	}
+
+	inflight.value = &meta
+
+	return &meta, nil
+}
+
+// StatementMetadata represents various metadata about a statement.
+type StatementMetadata struct {
+	// Keyspace is the keyspace of the table for the statement.
+	Keyspace string
+
+	// Table is the table of the statement.
+	Table string
+
+	// BindColumns are columns bound to the statement.
+	BindColumns []ColumnInfo
+
+	// PKBindColumnIndexes are the indexes of the BindColumns that correspond to
+	// partition key columns. If this is empty then one or more columns in the
+	// partition key were not bound to the statement.
+	PKBindColumnIndexes []int
+
+	// ResultColumns are the columns that are returned by the statement.
+	ResultColumns []ColumnInfo
+}
+
+// StatementMetadata returns metadata for a statement. If keyspace is empty,
+// the session's keyspace is used.
+func (s *Session) StatementMetadata(ctx context.Context, stmt, keyspace string) (StatementMetadata, error) {
+	if keyspace == "" {
+		keyspace = s.cfg.Keyspace
+	}
 
 	conn := s.getConn()
 	if conn == nil {
-		// TODO: better error?
-		inflight.err = errors.New("gocql: unable to fetch prepared info: no connection available")
-		return nil, inflight.err
+		return StatementMetadata{}, ErrNoConnections
 	}
 
 	// get the query info for the statement
-	info, inflight.err = conn.prepareStatement(ctx, stmt, nil)
-	if inflight.err != nil {
-		// don't cache this error
-		s.routingKeyInfoCache.Remove(stmt)
-		return nil, inflight.err
+	info, err := conn.prepareStatement(ctx, stmt, nil, keyspace)
+	if err != nil {
+		// TODO: it would be nice to mark hosts here but as we are not using the policies
+		// to fetch hosts we cant and we can't use the policies because they might
+		// require token awareness which requires this method
+		return StatementMetadata{}, err
 	}
 
-	// TODO: it would be nice to mark hosts here but as we are not using the policies
-	// to fetch hosts we cant
-
-	if info.request.colCount == 0 {
-		// no arguments, no routing key, and no error
-		return nil, nil
+	if info.request.keyspace != "" {
+		keyspace = info.request.keyspace
 	}
 
-	table := info.request.table
-	keyspace := info.request.keyspace
+	meta := StatementMetadata{
+		Keyspace:            keyspace,
+		Table:               info.request.table,
+		BindColumns:         info.request.columns,
+		PKBindColumnIndexes: info.request.pkeyColumns,
+		ResultColumns:       info.response.columns,
+	}
 
-	if len(info.request.pkeyColumns) > 0 {
-		// proto v4 dont need to calculate primary key columns
-		types := make([]TypeInfo, len(info.request.pkeyColumns))
-		for i, col := range info.request.pkeyColumns {
-			types[i] = info.request.columns[col].TypeInfo
+	// if it is protocol < v4 then we need to calculate the routing key info
+	if !info.request.supportsPKeyColumns && len(info.request.columns) > 0 {
+		keyspaceMetadata, err := s.KeyspaceMetadata(meta.Keyspace)
+		if err != nil {
+			// don't cache this error
+			return StatementMetadata{}, err
 		}
 
-		routingKeyInfo := &routingKeyInfo{
-			indexes:  info.request.pkeyColumns,
-			types:    types,
-			keyspace: keyspace,
-			table:    table,
+		tableMetadata, found := keyspaceMetadata.Tables[meta.Table]
+		if !found {
+			// unlikely that the statement could be prepared and the metadata for
+			// the table couldn't be found, but this may indicate either a bug
+			// in the metadata code, or that the table was just dropped.
+			return StatementMetadata{}, ErrNoMetadata
 		}
 
-		inflight.value = routingKeyInfo
-		return routingKeyInfo, nil
-	}
+		meta.PKBindColumnIndexes = make([]int, len(tableMetadata.PartitionKey))
+		for keyIndex, keyColumn := range tableMetadata.PartitionKey {
+			// set an indicator for checking if the mapping is missing
+			meta.PKBindColumnIndexes[keyIndex] = -1
 
-	var keyspaceMetadata *KeyspaceMetadata
-	keyspaceMetadata, inflight.err = s.KeyspaceMetadata(info.request.columns[0].Keyspace)
-	if inflight.err != nil {
-		// don't cache this error
-		s.routingKeyInfoCache.Remove(stmt)
-		return nil, inflight.err
-	}
+			// find the column in the query info
+			for colIndex, boundColumn := range info.request.columns {
+				if keyColumn.Name == boundColumn.Name {
+					// there may be many such bound columns, pick the first
+					meta.PKBindColumnIndexes[keyIndex] = colIndex
+					break
+				}
+			}
 
-	tableMetadata, found := keyspaceMetadata.Tables[table]
-	if !found {
-		// unlikely that the statement could be prepared and the metadata for
-		// the table couldn't be found, but this may indicate either a bug
-		// in the metadata code, or that the table was just dropped.
-		inflight.err = ErrNoMetadata
-		// don't cache this error
-		s.routingKeyInfoCache.Remove(stmt)
-		return nil, inflight.err
-	}
-
-	partitionKey = tableMetadata.PartitionKey
-
-	size := len(partitionKey)
-	routingKeyInfo := &routingKeyInfo{
-		indexes:  make([]int, size),
-		types:    make([]TypeInfo, size),
-		keyspace: keyspace,
-		table:    table,
-	}
-
-	for keyIndex, keyColumn := range partitionKey {
-		// set an indicator for checking if the mapping is missing
-		routingKeyInfo.indexes[keyIndex] = -1
-
-		// find the column in the query info
-		for argIndex, boundColumn := range info.request.columns {
-			if keyColumn.Name == boundColumn.Name {
-				// there may be many such bound columns, pick the first
-				routingKeyInfo.indexes[keyIndex] = argIndex
-				routingKeyInfo.types[keyIndex] = boundColumn.TypeInfo
+			if meta.PKBindColumnIndexes[keyIndex] == -1 {
+				// the partition key column is not bound to the statement
+				meta.PKBindColumnIndexes = nil
 				break
 			}
 		}
-
-		if routingKeyInfo.indexes[keyIndex] == -1 {
-			// missing a routing key column mapping
-			// no routing key, and no error
-			return nil, nil
-		}
 	}
-
-	// cache this result
-	inflight.value = routingKeyInfo
-
-	return routingKeyInfo, nil
+	return meta, nil
 }
 
-func (b *Batch) execute(ctx context.Context, conn *Conn) *Iter {
-	return conn.executeBatch(ctx, b)
+// Exec executes a batch operation and returns nil if successful
+// otherwise an error is returned describing the failure.
+func (b *Batch) Exec() error {
+	iter := b.session.executeBatch(b, b.context)
+	return iter.Close()
 }
 
-func (s *Session) executeBatch(batch *Batch) *Iter {
+// ExecContext executes a batch operation with the provided context and returns nil if successful
+// otherwise an error is returned describing the failure.
+func (b *Batch) ExecContext(ctx context.Context) error {
+	iter := b.session.executeBatch(b, ctx)
+	return iter.Close()
+}
+
+// Iter executes a batch operation and returns an Iter object
+// that can be used to access properties related to the execution like Iter.Attempts and Iter.Latency
+func (b *Batch) Iter() *Iter { return b.IterContext(b.context) }
+
+// IterContext executes a batch operation with the provided context and returns an Iter object
+// that can be used to access properties related to the execution like Iter.Attempts and Iter.Latency
+func (b *Batch) IterContext(ctx context.Context) *Iter {
+	return b.session.executeBatch(b, ctx)
+}
+
+func (s *Session) executeBatch(batch *Batch, ctx context.Context) *Iter {
+	b := newInternalBatch(batch, ctx)
 	// fail fast
 	if s.Closed() {
-		return &Iter{err: ErrSessionClosed}
+		return newErrIter(ErrSessionClosed, b.metrics, b.Keyspace(), b.getRoutingInfo(), b.getKeyspaceFunc())
 	}
 
 	// Prevent the execution of the batch if greater than the limit
 	// Currently batches have a limit of 65536 queries.
 	// https://datastax-oss.atlassian.net/browse/JAVA-229
 	if batch.Size() > BatchSizeMaximum {
-		return &Iter{err: ErrTooManyStmts}
+		return newErrIter(ErrTooManyStmts, b.metrics, b.Keyspace(), b.getRoutingInfo(), b.getKeyspaceFunc())
 	}
 
-	iter, err := s.executor.executeQuery(batch)
+	iter, err := s.executor.executeQuery(b)
 	if err != nil {
-		return &Iter{err: err}
+		return newErrIter(err, b.metrics, b.Keyspace(), b.getRoutingInfo(), b.getKeyspaceFunc())
 	}
 
 	return iter
 }
 
+// Deprecated: use Batch.Exec instead.
 // ExecuteBatch executes a batch operation and returns nil if successful
 // otherwise an error is returned describing the failure.
 func (s *Session) ExecuteBatch(batch *Batch) error {
-	iter := s.executeBatch(batch)
+	iter := s.executeBatch(batch, batch.context)
 	return iter.Close()
 }
 
+// Deprecated: use Batch.ExecCAS instead
 // ExecuteBatchCAS executes a batch operation and returns true if successful and
 // an iterator (to scan additional rows if more than one conditional statement)
 // was sent.
 // Further scans on the interator must also remember to include
 // the applied boolean as the first argument to *Iter.Scan
 func (s *Session) ExecuteBatchCAS(batch *Batch, dest ...interface{}) (applied bool, iter *Iter, err error) {
-	iter = s.executeBatch(batch)
+	return batch.ExecCAS(dest...)
+}
+
+// ExecCAS executes a batch operation and returns true if successful and
+// an iterator (to scan additional rows if more than one conditional statement)
+// was sent.
+// Further scans on the interator must also remember to include
+// the applied boolean as the first argument to *Iter.Scan
+func (b *Batch) ExecCAS(dest ...interface{}) (applied bool, iter *Iter, err error) {
+	return b.ExecCASContext(b.context, dest...)
+}
+
+// ExecCASContext executes a batch operation with the provided context and returns true if successful and
+// an iterator (to scan additional rows if more than one conditional statement)
+// was sent.
+// Further scans on the interator must also remember to include
+// the applied boolean as the first argument to *Iter.Scan
+func (b *Batch) ExecCASContext(ctx context.Context, dest ...interface{}) (applied bool, iter *Iter, err error) {
+	iter = b.session.executeBatch(b, ctx)
 	if err := iter.checkErrAndNotFound(); err != nil {
 		iter.Close()
 		return false, nil, err
@@ -758,21 +922,42 @@ func (s *Session) ExecuteBatchCAS(batch *Batch, dest ...interface{}) (applied bo
 		iter.Scan(&applied)
 	}
 
-	return applied, iter, nil
+	return applied, iter, iter.err
 }
 
+// Deprecated: use Batch.MapExecCAS instead
 // MapExecuteBatchCAS executes a batch operation much like ExecuteBatchCAS,
 // however it accepts a map rather than a list of arguments for the initial
 // scan.
 func (s *Session) MapExecuteBatchCAS(batch *Batch, dest map[string]interface{}) (applied bool, iter *Iter, err error) {
-	iter = s.executeBatch(batch)
+	return batch.MapExecCAS(dest)
+}
+
+// MapExecCAS executes a batch operation much like ExecuteBatchCAS,
+// however it accepts a map rather than a list of arguments for the initial
+// scan.
+func (b *Batch) MapExecCAS(dest map[string]interface{}) (applied bool, iter *Iter, err error) {
+	return b.MapExecCASContext(b.context, dest)
+}
+
+// MapExecCASContext executes a batch operation with the provided context much like ExecuteBatchCAS,
+// however it accepts a map rather than a list of arguments for the initial
+// scan.
+func (b *Batch) MapExecCASContext(ctx context.Context, dest map[string]interface{}) (applied bool, iter *Iter, err error) {
+	iter = b.session.executeBatch(b, ctx)
 	if err := iter.checkErrAndNotFound(); err != nil {
 		iter.Close()
 		return false, nil, err
 	}
 	iter.MapScan(dest)
-	applied = dest["[applied]"].(bool)
-	delete(dest, "[applied]")
+	if iter.err != nil {
+		return false, iter, iter.err
+	}
+	// check if [applied] was returned, otherwise it might not be CAS
+	if _, ok := dest["[applied]"]; ok {
+		applied = dest["[applied]"].(bool)
+		delete(dest, "[applied]")
+	}
 
 	// we usually close here, but instead of closing, just returin an error
 	// if MapScan failed. Although Close just returns err, using Close
@@ -790,36 +975,48 @@ type hostMetrics struct {
 }
 
 type queryMetrics struct {
+	totalAttempts int64
+	totalLatency  int64
+}
+
+func (qm *queryMetrics) attempt(addLatency time.Duration) int {
+	atomic.AddInt64(&qm.totalLatency, addLatency.Nanoseconds())
+	return int(atomic.AddInt64(&qm.totalAttempts, 1) - 1)
+}
+
+func (qm *queryMetrics) attempts() int {
+	return int(atomic.LoadInt64(&qm.totalAttempts))
+}
+
+func (qm *queryMetrics) latency() int64 {
+	attempts := atomic.LoadInt64(&qm.totalAttempts)
+	if attempts == 0 {
+		return atomic.LoadInt64(&qm.totalLatency)
+	}
+	return atomic.LoadInt64(&qm.totalLatency) / attempts
+}
+
+type hostMetricsManager interface {
+	attempt(addLatency time.Duration, host *HostInfo) *hostMetrics
+}
+
+type hostMetricsManagerImpl struct {
 	l sync.RWMutex
 	m map[string]*hostMetrics
-	// totalAttempts is total number of attempts.
-	// Equal to sum of all hostMetrics' Attempts.
-	totalAttempts int
 }
 
-// preFilledQueryMetrics initializes new queryMetrics based on per-host supplied data.
-func preFilledQueryMetrics(m map[string]*hostMetrics) *queryMetrics {
-	qm := &queryMetrics{m: m}
-	for _, hm := range qm.m {
-		qm.totalAttempts += hm.Attempts
-	}
-	return qm
+func newHostMetricsManager() *hostMetricsManagerImpl {
+	return &hostMetricsManagerImpl{m: make(map[string]*hostMetrics)}
 }
 
-// hostMetrics returns a snapshot of metrics for given host.
-// If the metrics for host don't exist, they are created.
-func (qm *queryMetrics) hostMetrics(host *HostInfo) *hostMetrics {
-	qm.l.Lock()
-	metrics := qm.hostMetricsLocked(host)
-	copied := new(hostMetrics)
-	*copied = *metrics
-	qm.l.Unlock()
-	return copied
+// preFilledHostMetricsMetricsManager initializes new hostMetrics based on per-host supplied data.
+func preFilledHostMetricsMetricsManager(m map[string]*hostMetrics) *hostMetricsManagerImpl {
+	return &hostMetricsManagerImpl{m: m}
 }
 
 // hostMetricsLocked gets or creates host metrics for given host.
 // It must be called only while holding qm.l lock.
-func (qm *queryMetrics) hostMetricsLocked(host *HostInfo) *hostMetrics {
+func (qm *hostMetricsManagerImpl) hostMetricsLocked(host *HostInfo) *hostMetrics {
 	metrics, exists := qm.m[host.ConnectAddress().String()]
 	if !exists {
 		// if the host is not in the map, it means it's been accessed for the first time
@@ -830,80 +1027,46 @@ func (qm *queryMetrics) hostMetricsLocked(host *HostInfo) *hostMetrics {
 	return metrics
 }
 
-// attempts returns the number of times the query was executed.
-func (qm *queryMetrics) attempts() int {
+func (qm *hostMetricsManagerImpl) attempt(addLatency time.Duration, host *HostInfo) *hostMetrics {
 	qm.l.Lock()
-	attempts := qm.totalAttempts
-	qm.l.Unlock()
-	return attempts
-}
-
-func (qm *queryMetrics) latency() int64 {
-	qm.l.Lock()
-	var (
-		attempts int
-		latency  int64
-	)
-	for _, metric := range qm.m {
-		attempts += metric.Attempts
-		latency += metric.TotalLatency
-	}
-	qm.l.Unlock()
-	if attempts > 0 {
-		return latency / int64(attempts)
-	}
-	return 0
-}
-
-// attempt adds given number of attempts and latency for given host.
-// It returns previous total attempts.
-// If needsHostMetrics is true, a copy of updated hostMetrics is returned.
-func (qm *queryMetrics) attempt(addAttempts int, addLatency time.Duration,
-	host *HostInfo, needsHostMetrics bool) (int, *hostMetrics) {
-	qm.l.Lock()
-
-	totalAttempts := qm.totalAttempts
-	qm.totalAttempts += addAttempts
-
 	updateHostMetrics := qm.hostMetricsLocked(host)
-	updateHostMetrics.Attempts += addAttempts
+	updateHostMetrics.Attempts += 1
 	updateHostMetrics.TotalLatency += addLatency.Nanoseconds()
-
-	var hostMetricsCopy *hostMetrics
-	if needsHostMetrics {
-		hostMetricsCopy = new(hostMetrics)
-		*hostMetricsCopy = *updateHostMetrics
-	}
-
 	qm.l.Unlock()
-	return totalAttempts, hostMetricsCopy
+	return updateHostMetrics
+}
+
+var emptyHostMetricsManager = &emptyHostMetricsManagerImpl{}
+
+type emptyHostMetricsManagerImpl struct {
+}
+
+func (qm *emptyHostMetricsManagerImpl) attempt(_ time.Duration, _ *HostInfo) *hostMetrics {
+	return nil
 }
 
 // Query represents a CQL statement that can be executed.
 type Query struct {
 	stmt                  string
 	values                []interface{}
-	cons                  Consistency
+	initialConsistency    Consistency
 	pageSize              int
 	routingKey            []byte
-	pageState             []byte
+	initialPageState      []byte
 	prefetch              float64
 	trace                 Tracer
 	observer              QueryObserver
 	session               *Session
-	conn                  *Conn
 	rt                    RetryPolicy
 	spec                  SpeculativeExecutionPolicy
 	binding               func(q *QueryInfo) ([]interface{}, error)
-	serialCons            SerialConsistency
+	serialCons            Consistency
 	defaultTimestamp      bool
 	defaultTimestampValue int64
 	disableSkipMetadata   bool
 	context               context.Context
 	idempotent            bool
 	customPayload         map[string][]byte
-	metrics               *queryMetrics
-	refCount              uint32
 
 	disableAutoPage bool
 
@@ -914,8 +1077,12 @@ type Query struct {
 	// tables in AWS MCS see
 	skipPrepare bool
 
-	// routingInfo is a pointer because Query can be copied and copyable struct can't hold a mutex.
-	routingInfo *queryRoutingInfo
+	// hostID specifies the host on which the query should be executed.
+	// If it is empty, then the host is picked by HostSelectionPolicy
+	hostID string
+
+	keyspace          string
+	nowInSecondsValue *int
 }
 
 type queryRoutingInfo struct {
@@ -927,11 +1094,22 @@ type queryRoutingInfo struct {
 	table string
 }
 
+func (qr *queryRoutingInfo) getKeyspace() string {
+	qr.mu.RLock()
+	defer qr.mu.RUnlock()
+	return qr.keyspace
+}
+
+func (qr *queryRoutingInfo) getTable() string {
+	qr.mu.RLock()
+	defer qr.mu.RUnlock()
+	return qr.table
+}
+
 func (q *Query) defaultsFromSession() {
 	s := q.session
 
-	s.mu.RLock()
-	q.cons = s.cons
+	q.initialConsistency = s.cons
 	q.pageSize = s.pageSize
 	q.trace = s.trace
 	q.observer = s.queryObserver
@@ -940,10 +1118,8 @@ func (q *Query) defaultsFromSession() {
 	q.serialCons = s.cfg.SerialConsistency
 	q.defaultTimestamp = s.cfg.DefaultTimestamp
 	q.idempotent = s.cfg.DefaultIdempotence
-	q.metrics = &queryMetrics{m: make(map[string]*hostMetrics)}
 
 	q.spec = &NonSpeculativeExecution{}
-	s.mu.RUnlock()
 }
 
 // Statement returns the statement that was used to generate this query.
@@ -959,52 +1135,37 @@ func (q Query) Values() []interface{} {
 
 // String implements the stringer interface.
 func (q Query) String() string {
-	return fmt.Sprintf("[query statement=%q values=%+v consistency=%s]", q.stmt, q.values, q.cons)
-}
-
-// Attempts returns the number of times the query was executed.
-func (q *Query) Attempts() int {
-	return q.metrics.attempts()
-}
-
-func (q *Query) AddAttempts(i int, host *HostInfo) {
-	q.metrics.attempt(i, 0, host, false)
-}
-
-// Latency returns the average amount of nanoseconds per attempt of the query.
-func (q *Query) Latency() int64 {
-	return q.metrics.latency()
-}
-
-func (q *Query) AddLatency(l int64, host *HostInfo) {
-	q.metrics.attempt(0, time.Duration(l)*time.Nanosecond, host, false)
+	return fmt.Sprintf("[query statement=%q values=%+v consistency=%s]", q.stmt, q.values, q.initialConsistency)
 }
 
 // Consistency sets the consistency level for this query. If no consistency
 // level have been set, the default consistency level of the cluster
 // is used.
 func (q *Query) Consistency(c Consistency) *Query {
-	q.cons = c
+	q.initialConsistency = c
 	return q
 }
 
 // GetConsistency returns the currently configured consistency level for
 // the query.
 func (q *Query) GetConsistency() Consistency {
-	return q.cons
+	return q.initialConsistency
 }
 
-// Same as Consistency but without a return value
+// Deprecated: use Query.Consistency instead
 func (q *Query) SetConsistency(c Consistency) {
-	q.cons = c
+	q.initialConsistency = c
 }
 
-// CustomPayload sets the custom payload level for this query.
+// CustomPayload sets the custom payload level for this query. The map is not copied internally
+// so it shouldn't be modified after the query is scheduled for execution.
 func (q *Query) CustomPayload(customPayload map[string][]byte) *Query {
 	q.customPayload = customPayload
 	return q
 }
 
+// Deprecated: Context retrieval is deprecated. Pass context directly to execution methods
+// like ExecContext or IterContext instead.
 func (q *Query) Context() context.Context {
 	if q.context == nil {
 		return context.Background()
@@ -1065,11 +1226,8 @@ func (q *Query) RoutingKey(routingKey []byte) *Query {
 	return q
 }
 
-func (q *Query) withContext(ctx context.Context) ExecutableQuery {
-	// I really wish go had covariant types
-	return q.WithContext(ctx)
-}
-
+// Deprecated: Use Query.ExecContext or Query.IterContext instead. This will be removed in a future major version.
+//
 // WithContext returns a shallow copy of q with its context
 // set to ctx.
 //
@@ -1082,46 +1240,13 @@ func (q *Query) WithContext(ctx context.Context) *Query {
 	return &q2
 }
 
-// Deprecate: does nothing, cancel the context passed to WithContext
-func (q *Query) Cancel() {
-	// TODO: delete
-}
-
-func (q *Query) execute(ctx context.Context, conn *Conn) *Iter {
-	return conn.executeQuery(ctx, q)
-}
-
-func (q *Query) attempt(keyspace string, end, start time.Time, iter *Iter, host *HostInfo) {
-	latency := end.Sub(start)
-	attempt, metricsForHost := q.metrics.attempt(1, latency, host, q.observer != nil)
-
-	if q.observer != nil {
-		q.observer.ObserveQuery(q.Context(), ObservedQuery{
-			Keyspace:  keyspace,
-			Statement: q.stmt,
-			Values:    q.values,
-			Start:     start,
-			End:       end,
-			Rows:      iter.numRows,
-			Host:      host,
-			Metrics:   metricsForHost,
-			Err:       iter.err,
-			Attempt:   attempt,
-		})
-	}
-}
-
-func (q *Query) retryPolicy() RetryPolicy {
-	return q.rt
-}
-
 // Keyspace returns the keyspace the query will be executed against.
 func (q *Query) Keyspace() string {
 	if q.getKeyspace != nil {
 		return q.getKeyspace()
 	}
-	if q.routingInfo.keyspace != "" {
-		return q.routingInfo.keyspace
+	if q.keyspace != "" {
+		return q.keyspace
 	}
 
 	if q.session == nil {
@@ -1132,92 +1257,12 @@ func (q *Query) Keyspace() string {
 	return q.session.cfg.Keyspace
 }
 
-func (q *Query) KeyspaceAndTableYb() (string, string) {
-
-	if q.session == nil {
-		return "", ""
-	}
-
-	var (
-		table    string = ""
-		keyspace string = ""
-		info     *preparedStatment
-		err      error
-	)
-
-	conn := q.session.getConn()
-	if conn != nil {
-		info, err = conn.prepareStatement(q.Context(), q.stmt, nil)
-		if err == nil {
-			table = info.request.columns[0].Table
-			keyspace = info.request.columns[0].Keyspace
-			if table != "" && keyspace != "" {
-				return keyspace, table
-			}
-		}
-	}
-
-	return "", ""
-}
-
-// Table returns name of the table the query will be executed against.
-func (q *Query) Table() string {
-	return q.routingInfo.table
-}
-
-// GetRoutingKey gets the routing key to use for routing this query. If
-// a routing key has not been explicitly set, then the routing key will
-// be constructed if possible using the keyspace's schema and the query
-// info for this query statement. If the routing key cannot be determined
-// then nil will be returned with no error. On any error condition,
-// an error description will be returned.
-func (q *Query) GetRoutingKey() ([]byte, error) {
-	if q.routingKey != nil {
-		return q.routingKey, nil
-	} else if q.binding != nil && len(q.values) == 0 {
-		// If this query was created using session.Bind we wont have the query
-		// values yet, so we have to pass down to the next policy.
-		// TODO: Remove this and handle this case
-		return nil, nil
-	}
-
-	// try to determine the routing key
-	routingKeyInfo, err := q.session.routingKeyInfo(q.Context(), q.stmt)
-	if err != nil {
-		return nil, err
-	}
-
-	if routingKeyInfo != nil {
-		q.routingInfo.mu.Lock()
-		q.routingInfo.keyspace = routingKeyInfo.keyspace
-		q.routingInfo.table = routingKeyInfo.table
-		q.routingInfo.mu.Unlock()
-	}
-	return createRoutingKey(routingKeyInfo, q.values)
-}
-
-func (q *Query) GetRoutingKeyYb() ([]byte, error) {
-	if q.routingKey != nil {
-		return q.routingKey, nil
-	} else if q.binding != nil && len(q.values) == 0 {
-		// If this query was created using session.Bind we wont have the query
-		// values yet, so we have to pass down to the next policy.
-		// TODO: Remove this and handle this case
-		return nil, nil
-	}
-
-	// try to determine the routing key
-	routingKeyInfo, err := q.session.routingKeyInfo(q.Context(), q.stmt)
-	if err != nil {
-		return nil, err
-	}
-
-	return createRoutingKeyYb(routingKeyInfo, q.values)
-}
-
 func (q *Query) shouldPrepare() bool {
+	return shouldPrepare(q.stmt)
+}
 
-	stmt := strings.TrimLeftFunc(strings.TrimRightFunc(q.stmt, func(r rune) bool {
+func shouldPrepare(s string) bool {
+	stmt := strings.TrimLeftFunc(strings.TrimRightFunc(s, func(r rune) bool {
 		return unicode.IsSpace(r) || r == ';'
 	}), unicode.IsSpace)
 
@@ -1257,11 +1302,6 @@ func (q *Query) SetSpeculativeExecutionPolicy(sp SpeculativeExecutionPolicy) *Qu
 	return q
 }
 
-// speculativeExecutionPolicy fetches the policy
-func (q *Query) speculativeExecutionPolicy() SpeculativeExecutionPolicy {
-	return q.spec
-}
-
 // IsIdempotent returns whether the query is marked as idempotent.
 // Non-idempotent query won't be retried.
 // See "Retries and speculative execution" in package docs for more details.
@@ -1280,9 +1320,10 @@ func (q *Query) Idempotent(value bool) *Query {
 
 // Bind sets query arguments of query. This can also be used to rebind new query arguments
 // to an existing query instance.
+//
+// For supported Go to CQL type conversions for query parameters, see Session.Query documentation.
 func (q *Query) Bind(v ...interface{}) *Query {
 	q.values = v
-	q.pageState = nil
 	return q
 }
 
@@ -1291,16 +1332,26 @@ func (q *Query) Bind(v ...interface{}) *Query {
 // either SERIAL or LOCAL_SERIAL and if not present, it defaults to
 // SERIAL. This option will be ignored for anything else that a
 // conditional update/insert.
-func (q *Query) SerialConsistency(cons SerialConsistency) *Query {
+func (q *Query) SerialConsistency(cons Consistency) *Query {
+	if !cons.isSerial() {
+		panic("serial consistency can only be SERIAL or LOCAL_SERIAL got " + cons.String())
+	}
 	q.serialCons = cons
 	return q
+}
+
+// GetSerialConsistency returns the currently configured serial consistency level
+// for the query. The boolean return value indicates whether a serial consistency
+// level has been set.
+func (q *Query) GetSerialConsistency() (Consistency, bool) {
+	return q.serialCons, q.serialCons.isSerial()
 }
 
 // PageState sets the paging state for the query to resume paging from a specific
 // point in time. Setting this will disable to query paging for this query, and
 // must be used for all subsequent pages.
 func (q *Query) PageState(state []byte) *Query {
-	q.pageState = state
+	q.initialPageState = state
 	q.disableAutoPage = true
 	return q
 }
@@ -1312,7 +1363,7 @@ func (q *Query) PageState(state []byte) *Query {
 // CAS operations which do not end in Cas.
 //
 // See https://issues.apache.org/jira/browse/CASSANDRA-11099
-// https://github.com/gocql/gocql/issues/612
+// https://github.com/apache/cassandra-gocql-driver/issues/612
 func (q *Query) NoSkipMetadata() *Query {
 	q.disableSkipMetadata = true
 	return q
@@ -1321,6 +1372,11 @@ func (q *Query) NoSkipMetadata() *Query {
 // Exec executes the query without returning any rows.
 func (q *Query) Exec() error {
 	return q.Iter().Close()
+}
+
+// ExecContext executes the query with the provided context without returning any rows.
+func (q *Query) ExecContext(ctx context.Context) error {
+	return q.IterContext(ctx).Close()
 }
 
 func isUseStatement(stmt string) bool {
@@ -1334,22 +1390,47 @@ func isUseStatement(stmt string) bool {
 // Iter executes the query and returns an iterator capable of iterating
 // over all results.
 func (q *Query) Iter() *Iter {
+	return q.IterContext(q.context)
+}
+
+// IterContext executes the query with the provided context and returns an iterator capable of iterating
+// over all results.
+func (q *Query) IterContext(ctx context.Context) *Iter {
 	if isUseStatement(q.stmt) {
-		return &Iter{err: ErrUseStmt}
+		return newErrIter(ErrUseStmt, &queryMetrics{}, q.Keyspace(), nil, q.getKeyspace)
 	}
-	// if the query was specifically run on a connection then re-use that
-	// connection when fetching the next results
-	if q.conn != nil {
-		return q.conn.executeQuery(q.Context(), q)
+
+	internalQry := newInternalQuery(q, ctx)
+	return q.session.executeQuery(internalQry)
+}
+
+func (q *Query) iterInternal(c *Conn, ctx context.Context) *Iter {
+	internalQry := newInternalQuery(q, ctx)
+	internalQry.conn = c
+
+	iter := c.executeQuery(internalQry.Context(), internalQry)
+	if iter != nil {
+		// set iter.host so that the caller can retrieve the connect address which should be preferable (if valid) for the local host
+		iter.host = c.host
 	}
-	return q.session.executeQuery(q)
+	return iter
 }
 
 // MapScan executes the query, copies the columns of the first selected
 // row into the map pointed at by m and discards the rest. If no rows
 // were selected, ErrNotFound is returned.
+//
+// Columns are automatically converted to Go types based on their CQL type.
+// See Iter.SliceMap for the complete CQL to Go type mapping table and examples.
 func (q *Query) MapScan(m map[string]interface{}) error {
-	iter := q.Iter()
+	return q.MapScanContext(q.context, m)
+}
+
+// MapScanContext executes the query with the provided context, copies the columns of the first selected
+// row into the map pointed at by m and discards the rest. If no rows
+// were selected, ErrNotFound is returned.
+func (q *Query) MapScanContext(ctx context.Context, m map[string]interface{}) error {
+	iter := q.IterContext(ctx)
 	if err := iter.checkErrAndNotFound(); err != nil {
 		return err
 	}
@@ -1360,8 +1441,19 @@ func (q *Query) MapScan(m map[string]interface{}) error {
 // Scan executes the query, copies the columns of the first selected
 // row into the values pointed at by dest and discards the rest. If no rows
 // were selected, ErrNotFound is returned.
+//
+// For supported CQL to Go type conversions, see Iter.Scan documentation.
 func (q *Query) Scan(dest ...interface{}) error {
-	iter := q.Iter()
+	return q.ScanContext(q.context, dest...)
+}
+
+// ScanContext executes the query with the provided context, copies the columns of the first selected
+// row into the values pointed at by dest and discards the rest. If no rows
+// were selected, ErrNotFound is returned.
+//
+// For supported CQL to Go type conversions, see Iter.Scan documentation.
+func (q *Query) ScanContext(ctx context.Context, dest ...interface{}) error {
+	iter := q.IterContext(ctx)
 	if err := iter.checkErrAndNotFound(); err != nil {
 		return err
 	}
@@ -1377,9 +1469,25 @@ func (q *Query) Scan(dest ...interface{}) error {
 // As for INSERT .. IF NOT EXISTS, previous values will be returned as if
 // SELECT * FROM. So using ScanCAS with INSERT is inherently prone to
 // column mismatching. Use MapScanCAS to capture them safely.
+//
+// For supported CQL to Go type conversions, see Iter.Scan documentation.
 func (q *Query) ScanCAS(dest ...interface{}) (applied bool, err error) {
+	return q.ScanCASContext(q.context, dest...)
+}
+
+// ScanCASContext executes a lightweight transaction (i.e. an UPDATE or INSERT
+// statement containing an IF clause) with the provided context. If the transaction fails because
+// the existing values did not match, the previous values will be stored
+// in dest.
+//
+// As for INSERT .. IF NOT EXISTS, previous values will be returned as if
+// SELECT * FROM. So using ScanCAS with INSERT is inherently prone to
+// column mismatching. Use MapScanCAS to capture them safely.
+//
+// For supported CQL to Go type conversions, see Iter.Scan documentation.
+func (q *Query) ScanCASContext(ctx context.Context, dest ...interface{}) (applied bool, err error) {
 	q.disableSkipMetadata = true
-	iter := q.Iter()
+	iter := q.IterContext(ctx)
 	if err := iter.checkErrAndNotFound(); err != nil {
 		return false, err
 	}
@@ -1401,58 +1509,75 @@ func (q *Query) ScanCAS(dest ...interface{}) (applied bool, err error) {
 // SELECT * FROM. So using ScanCAS with INSERT is inherently prone to
 // column mismatching. MapScanCAS is added to capture them safely.
 func (q *Query) MapScanCAS(dest map[string]interface{}) (applied bool, err error) {
+	return q.MapScanCASContext(q.context, dest)
+}
+
+// MapScanCASContext executes a lightweight transaction (i.e. an UPDATE or INSERT
+// statement containing an IF clause) with the provided context. If the transaction fails because
+// the existing values did not match, the previous values will be stored
+// in dest map.
+//
+// As for INSERT .. IF NOT EXISTS, previous values will be returned as if
+// SELECT * FROM. So using ScanCAS with INSERT is inherently prone to
+// column mismatching. MapScanCAS is added to capture them safely.
+func (q *Query) MapScanCASContext(ctx context.Context, dest map[string]interface{}) (applied bool, err error) {
 	q.disableSkipMetadata = true
-	iter := q.Iter()
+	iter := q.IterContext(ctx)
 	if err := iter.checkErrAndNotFound(); err != nil {
 		return false, err
 	}
 	iter.MapScan(dest)
-	applied = dest["[applied]"].(bool)
-	delete(dest, "[applied]")
+	if iter.err != nil {
+		return false, iter.err
+	}
+	// check if [applied] was returned, otherwise it might not be CAS
+	if _, ok := dest["[applied]"]; ok {
+		applied = dest["[applied]"].(bool)
+		delete(dest, "[applied]")
+	}
 
 	return applied, iter.Close()
 }
 
-// Release releases a query back into a pool of queries. Released Queries
-// cannot be reused.
+// SetHostID allows to define the host the query should be executed against. If the
+// host was filtered or otherwise unavailable, then the query will error. If an empty
+// string is sent, the default behavior, using the configured HostSelectionPolicy will
+// be used. A hostID can be obtained from HostInfo.HostID() after calling GetHosts().
+func (q *Query) SetHostID(hostID string) *Query {
+	q.hostID = hostID
+	return q
+}
+
+// GetHostID returns id of the host on which query should be executed.
+func (q *Query) GetHostID() string {
+	return q.hostID
+}
+
+// SetKeyspace will enable keyspace flag on the query.
+// It allows to specify the keyspace that the query should be executed in
 //
-// Example:
+// Only available on protocol >= 5.
+func (q *Query) SetKeyspace(keyspace string) *Query {
+	q.keyspace = keyspace
+	return q
+}
+
+// WithNowInSeconds will enable the with now_in_seconds flag on the query.
+// Also, it allows to define now_in_seconds value.
 //
-//	qry := session.Query("SELECT * FROM my_table")
-//	qry.Exec()
-//	qry.Release()
-func (q *Query) Release() {
-	q.decRefCount()
+// Only available on protocol >= 5.
+func (q *Query) WithNowInSeconds(now int) *Query {
+	q.nowInSecondsValue = &now
+	return q
 }
 
-// reset zeroes out all fields of a query so that it can be safely pooled.
-func (q *Query) reset() {
-	*q = Query{routingInfo: &queryRoutingInfo{}, refCount: 1}
-}
-
-func (q *Query) incRefCount() {
-	atomic.AddUint32(&q.refCount, 1)
-}
-
-func (q *Query) decRefCount() {
-	if res := atomic.AddUint32(&q.refCount, ^uint32(0)); res == 0 {
-		// do release
-		q.reset()
-		queryPool.Put(q)
-	}
-}
-
-func (q *Query) borrowForExecution() {
-	q.incRefCount()
-}
-
-func (q *Query) releaseAfterExecution() {
-	q.decRefCount()
-}
-
-// Iter represents an iterator that can be used to iterate over all rows that
-// were returned by a query. The iterator might send additional queries to the
+// Iter represents the result that was returned by the execution of a statement.
+//
+// If the statement is a query then this can be seen as an iterator that can be used to iterate over all rows that
+// were returned by the query. The iterator might send additional queries to the
 // database during the iteration if paging was enabled.
+//
+// It also contains metadata about the request that can be accessed by Iter.Keyspace(), Iter.Table(), Iter.Attempts(), Iter.Latency().
 type Iter struct {
 	err     error
 	pos     int
@@ -1460,12 +1585,27 @@ type Iter struct {
 	numRows int
 	next    *nextIter
 	host    *HostInfo
+	metrics *queryMetrics
+
+	getKeyspace func() string
+	keyspace    string
+	routingInfo *queryRoutingInfo
 
 	framer *framer
 	closed int32
 }
 
-// Host returns the host which the query was sent to.
+func newErrIter(err error, metrics *queryMetrics, keyspace string, routingInfo *queryRoutingInfo, getKeyspace func() string) *Iter {
+	iter := newIter(metrics, keyspace, routingInfo, getKeyspace)
+	iter.err = err
+	return iter
+}
+
+func newIter(metrics *queryMetrics, keyspace string, routingInfo *queryRoutingInfo, getKeyspace func() string) *Iter {
+	return &Iter{metrics: metrics, keyspace: keyspace, routingInfo: routingInfo, getKeyspace: getKeyspace}
+}
+
+// Host returns the host which the statement was sent to.
 func (iter *Iter) Host() *HostInfo {
 	return iter.host
 }
@@ -1473,6 +1613,39 @@ func (iter *Iter) Host() *HostInfo {
 // Columns returns the name and type of the selected columns.
 func (iter *Iter) Columns() []ColumnInfo {
 	return iter.meta.columns
+}
+
+// Attempts returns the number of times the statement was executed.
+func (iter *Iter) Attempts() int {
+	return iter.metrics.attempts()
+}
+
+// Latency returns the average amount of nanoseconds per attempt of the statement.
+func (iter *Iter) Latency() int64 {
+	return iter.metrics.latency()
+}
+
+// Keyspace returns the keyspace the statement was executed against if the driver could determine it.
+func (iter *Iter) Keyspace() string {
+	if iter.getKeyspace != nil {
+		return iter.getKeyspace()
+	}
+
+	if iter.routingInfo != nil {
+		if ks := iter.routingInfo.getKeyspace(); ks != "" {
+			return ks
+		}
+	}
+
+	return iter.keyspace
+}
+
+// Table returns name of the table the statement was executed against if the driver could determine it.
+func (iter *Iter) Table() string {
+	if iter.routingInfo != nil {
+		return iter.routingInfo.getTable()
+	}
+	return ""
 }
 
 type Scanner interface {
@@ -1487,6 +1660,8 @@ type Scanner interface {
 	// when unmarshalling a column into the value in dest an error is returned and the row is invalidated
 	// until the next call to Next.
 	// Next must be called before calling Scan, if it is not an error is returned.
+	//
+	// For supported CQL to Go type conversions, see Iter.Scan documentation.
 	Scan(...interface{}) error
 
 	// Err returns the if there was one during iteration that resulted in iteration being unable to complete.
@@ -1600,7 +1775,7 @@ func (iter *Iter) Scanner() Scanner {
 }
 
 func (iter *Iter) readColumn() ([]byte, error) {
-	return iter.framer.readBytesInternal()
+	return iter.framer.readBytes()
 }
 
 // Scan consumes the next row of the iterator and copies the columns of the
@@ -1611,6 +1786,68 @@ func (iter *Iter) readColumn() ([]byte, error) {
 // Scan returns true if the row was successfully unmarshaled or false if the
 // end of the result set was reached or if an error occurred. Close should
 // be called afterwards to retrieve any potential errors.
+//
+// Supported CQL to Go type conversions are as follows, other type combinations may be added in the future:
+//
+//	CQL Type                     | Go Type (dest)              | Note
+//	ascii, text, varchar         | *string                     |
+//	ascii, text, varchar         | *[]byte                     | non-nil buffer is reused
+//	bigint, counter              | *int64                      |
+//	bigint, counter              | *int, *int32, *int16, *int8 | with range checking
+//	bigint, counter              | *uint64, *uint32, *uint16   | with range checking
+//	bigint, counter              | *big.Int                    |
+//	bigint, counter              | *string                     | formatted as base 10 number
+//	blob                         | *[]byte                     | non-nil buffer is reused
+//	boolean                      | *bool                       |
+//	date                         | *time.Time                  | start of day in UTC
+//	date                         | *string                     | formatted as "2006-01-02"
+//	decimal                      | *inf.Dec                    |
+//	double                       | *float64                    |
+//	duration                     | *gocql.Duration             |
+//	duration                     | *time.Duration              | with range checking
+//	float                        | *float32                    |
+//	inet                         | *net.IP                     |
+//	inet                         | *string                     | IPv4 or IPv6 address string
+//	int                          | *int                        |
+//	int                          | *int32, *int16, *int8       | with range checking
+//	int                          | *uint32, *uint16, *uint8    | with range checking
+//	list<T>, set<T>              | *[]T                        |
+//	list<T>, set<T>              | *[N]T                       | array with compatible size
+//	map<K,V>                     | *map[K]V                    |
+//	smallint                     | *int16                      |
+//	smallint                     | *int, *int32, *int8         | with range checking
+//	smallint                     | *uint16, *uint8             | with range checking
+//	time                         | *time.Duration              | nanoseconds since start of day
+//	time                         | *int64                      | nanoseconds since start of day
+//	timestamp                    | *time.Time                  |
+//	timestamp                    | *int64                      | milliseconds since Unix epoch
+//	timeuuid                     | *gocql.UUID                 |
+//	timeuuid                     | *time.Time                  | timestamp of the UUID
+//	timeuuid                     | *string                     | hex representation
+//	timeuuid                     | *[]byte                     | 16-byte raw UUID
+//	tinyint                      | *int8                       |
+//	tinyint                      | *int, *int32, *int16        | with range checking
+//	tinyint                      | *uint8                      | with range checking
+//	tuple<T1,T2,...>             | *[]interface{}              |
+//	tuple<T1,T2,...>             | *[N]interface{}             | array with compatible size
+//	tuple<T1,T2,...>             | *struct                     | fields unmarshaled in declaration order
+//	user-defined types           | gocql.UDTUnmarshaler        | UnmarshalUDT is called
+//	user-defined types           | *map[string]interface{}     |
+//	user-defined types           | *struct                     | cql tag or field name matching
+//	uuid                         | *gocql.UUID                 |
+//	uuid                         | *string                     | hex representation
+//	uuid                         | *[]byte                     | 16-byte raw UUID
+//	varint                       | *big.Int                    |
+//	varint                       | *int64, *int32, *int16, *int8 | with range checking
+//	varint                       | *string                     | formatted as base 10 number
+//	vector<T,N>                  | *[]T                        |
+//	vector<T,N>                  | *[N]T                       | array with exact size match
+//
+// Important Notes:
+//   - NULL values are unmarshaled as zero values of the destination type
+//   - Use **Type (pointer to pointer) to distinguish NULL from zero values
+//   - Range checking prevents overflow when converting between numeric types
+//   - For SliceMap/MapScan type mappings, see Iter.SliceMap documentation
 func (iter *Iter) Scan(dest ...interface{}) bool {
 	if iter.err != nil {
 		return false
@@ -1725,7 +1962,7 @@ func (iter *Iter) NumRows() int {
 // nextIter holds state for fetching a single page in an iterator.
 // single page might be attempted multiple times due to retries.
 type nextIter struct {
-	qry   *Query
+	q     *internalQuery
 	pos   int
 	oncea sync.Once
 	once  sync.Once
@@ -1742,10 +1979,10 @@ func (n *nextIter) fetch() *Iter {
 	n.once.Do(func() {
 		// if the query was specifically run on a connection then re-use that
 		// connection when fetching the next results
-		if n.qry.conn != nil {
-			n.next = n.qry.conn.executeQuery(n.qry.Context(), n.qry)
+		if n.q.conn != nil {
+			n.next = n.q.conn.executeQuery(n.q.qryOpts.context, n.q)
 		} else {
-			n.next = n.qry.session.executeQuery(n.qry)
+			n.next = n.q.session.executeQuery(n.q)
 		}
 	})
 	return n.next
@@ -1762,34 +1999,24 @@ type Batch struct {
 	trace                 Tracer
 	observer              BatchObserver
 	session               *Session
-	serialCons            SerialConsistency
+	serialCons            Consistency
 	defaultTimestamp      bool
 	defaultTimestampValue int64
 	context               context.Context
-	cancelBatch           func()
 	keyspace              string
-	metrics               *queryMetrics
-	firstBoundStmtIdxYB   int //to keep track of which statement in the batch is the first bound statement
-
-	// routingInfo is a pointer because Query can be copied and copyable struct can't hold a mutex.
-	routingInfo *queryRoutingInfo
+	nowInSeconds          *int
 }
 
-// NewBatch creates a new batch operation without defaults from the cluster
-//
-// Deprecated: use session.NewBatch instead
-func NewBatch(typ BatchType) *Batch {
-	return &Batch{
-		Type:        typ,
-		metrics:     &queryMetrics{m: make(map[string]*hostMetrics)},
-		spec:        &NonSpeculativeExecution{},
-		routingInfo: &queryRoutingInfo{},
-	}
-}
-
+// Deprecated: use Session.Batch instead
 // NewBatch creates a new batch operation using defaults defined in the cluster
+//
+// Deprecated: use Session.Batch instead
 func (s *Session) NewBatch(typ BatchType) *Batch {
-	s.mu.RLock()
+	return s.Batch(typ)
+}
+
+// Batch creates a new batch operation using defaults defined in the cluster
+func (s *Session) Batch(typ BatchType) *Batch {
 	batch := &Batch{
 		Type:             typ,
 		rt:               s.cfg.RetryPolicy,
@@ -1800,12 +2027,9 @@ func (s *Session) NewBatch(typ BatchType) *Batch {
 		Cons:             s.cons,
 		defaultTimestamp: s.cfg.DefaultTimestamp,
 		keyspace:         s.cfg.Keyspace,
-		metrics:          &queryMetrics{m: make(map[string]*hostMetrics)},
 		spec:             &NonSpeculativeExecution{},
-		routingInfo:      &queryRoutingInfo{},
 	}
 
-	s.mu.RUnlock()
 	return batch
 }
 
@@ -1827,58 +2051,12 @@ func (b *Batch) Keyspace() string {
 	return b.keyspace
 }
 
-func (b *Batch) KeyspaceAndTableYb() (string, string) {
-
-	if b.session == nil {
-		return "", ""
-	}
-	if b.firstBoundStmtIdxYB == -1 {
-		return "", ""
-	}
-
-	var (
-		table    string = ""
-		keyspace string = ""
-		info     *preparedStatment
-		err      error
-	)
-
-	conn := b.session.getConn()
-	if conn != nil {
-		info, err = conn.prepareStatement(b.Context(), b.Entries[b.firstBoundStmtIdxYB].Stmt, nil)
-		if err == nil {
-			table = info.request.columns[0].Table
-			keyspace = info.request.columns[0].Keyspace
-			if table != "" && keyspace != "" {
-				return keyspace, table
-			}
-		}
-	}
-
-	return "", ""
-}
-
-// Batch has no reasonable eqivalent of Query.Table().
-func (b *Batch) Table() string {
-	return b.routingInfo.table
-}
-
-// Attempts returns the number of attempts made to execute the batch.
-func (b *Batch) Attempts() int {
-	return b.metrics.attempts()
-}
-
-func (b *Batch) AddAttempts(i int, host *HostInfo) {
-	b.metrics.attempt(i, 0, host, false)
-}
-
-// Latency returns the average number of nanoseconds to execute a single attempt of the batch.
-func (b *Batch) Latency() int64 {
-	return b.metrics.latency()
-}
-
-func (b *Batch) AddLatency(l int64, host *HostInfo) {
-	b.metrics.attempt(0, time.Duration(l)*time.Nanosecond, host, false)
+// Consistency sets the consistency level for this batch. If no consistency
+// level have been set, the default consistency level of the cluster
+// is used.
+func (b *Batch) Consistency(cons Consistency) *Batch {
+	b.Cons = cons
+	return b
 }
 
 // GetConsistency returns the currently configured consistency level for the batch
@@ -1887,12 +2065,13 @@ func (b *Batch) GetConsistency() Consistency {
 	return b.Cons
 }
 
-// SetConsistency sets the currently configured consistency level for the batch
-// operation.
+// Deprecated: Use Batch.Consistency
 func (b *Batch) SetConsistency(c Consistency) {
 	b.Cons = c
 }
 
+// Deprecated: Context retrieval is deprecated. Pass context directly to execution methods
+// like ExecContext or IterContext instead.
 func (b *Batch) Context() context.Context {
 	if b.context == nil {
 		return context.Background()
@@ -1918,20 +2097,21 @@ func (b *Batch) SpeculativeExecutionPolicy(sp SpeculativeExecutionPolicy) *Batch
 	return b
 }
 
-// Query adds the query to the batch operation
-func (b *Batch) Query(stmt string, args ...interface{}) {
+// Query adds the query to the batch operation.
+//
+// For supported Go to CQL type conversions for query parameters, see Session.Query documentation.
+func (b *Batch) Query(stmt string, args ...interface{}) *Batch {
 	b.Entries = append(b.Entries, BatchEntry{Stmt: stmt, Args: args})
+	return b
 }
 
 // Bind adds the query to the batch operation and correlates it with a binding callback
 // that will be invoked when the batch is executed. The binding callback allows the application
 // to define which query argument values will be marshalled as part of the batch execution.
+//
+// For supported Go to CQL type conversions for query parameters, see Session.Query documentation.
 func (b *Batch) Bind(stmt string, bind func(q *QueryInfo) ([]interface{}, error)) {
 	b.Entries = append(b.Entries, BatchEntry{Stmt: stmt, binding: bind})
-}
-
-func (b *Batch) retryPolicy() RetryPolicy {
-	return b.rt
 }
 
 // RetryPolicy sets the retry policy to use when executing the batch operation
@@ -1940,10 +2120,8 @@ func (b *Batch) RetryPolicy(r RetryPolicy) *Batch {
 	return b
 }
 
-func (b *Batch) withContext(ctx context.Context) ExecutableQuery {
-	return b.WithContext(ctx)
-}
-
+// Deprecated: Use Batch.ExecContext or Batch.IterContext instead. This will be removed in a future major version.
+//
 // WithContext returns a shallow copy of b with its context
 // set to ctx.
 //
@@ -1954,11 +2132,6 @@ func (b *Batch) WithContext(ctx context.Context) *Batch {
 	b2 := *b
 	b2.context = ctx
 	return &b2
-}
-
-// Deprecate: does nothing, cancel the context passed to WithContext
-func (*Batch) Cancel() {
-	// TODO: delete
 }
 
 // Size returns the number of batch statements to be executed by the batch operation.
@@ -1973,9 +2146,19 @@ func (b *Batch) Size() int {
 // conditional update/insert.
 //
 // Only available for protocol 3 and above
-func (b *Batch) SerialConsistency(cons SerialConsistency) *Batch {
+func (b *Batch) SerialConsistency(cons Consistency) *Batch {
+	if !cons.isSerial() {
+		panic("serial consistency can only be SERIAL or LOCAL_SERIAL got " + cons.String())
+	}
 	b.serialCons = cons
 	return b
+}
+
+// GetSerialConsistency returns the currently configured serial consistency level
+// for the batch. The boolean return value indicates whether a serial consistency
+// level has been set.
+func (b *Batch) GetSerialConsistency() (Consistency, bool) {
+	return b.serialCons, b.serialCons.isSerial()
 }
 
 // DefaultTimestamp will enable the with default timestamp flag on the query.
@@ -2001,111 +2184,20 @@ func (b *Batch) WithTimestamp(timestamp int64) *Batch {
 	return b
 }
 
-func (b *Batch) attempt(keyspace string, end, start time.Time, iter *Iter, host *HostInfo) {
-	latency := end.Sub(start)
-	attempt, metricsForHost := b.metrics.attempt(1, latency, host, b.observer != nil)
-
-	if b.observer == nil {
-		return
-	}
-
-	statements := make([]string, len(b.Entries))
-	values := make([][]interface{}, len(b.Entries))
-
-	for i, entry := range b.Entries {
-		statements[i] = entry.Stmt
-		values[i] = entry.Args
-	}
-
-	b.observer.ObserveBatch(b.Context(), ObservedBatch{
-		Keyspace:   keyspace,
-		Statements: statements,
-		Values:     values,
-		Start:      start,
-		End:        end,
-		// Rows not used in batch observations // TODO - might be able to support it when using BatchCAS
-		Host:    host,
-		Metrics: metricsForHost,
-		Err:     iter.err,
-		Attempt: attempt,
-	})
-}
-
-func (b *Batch) GetRoutingKey() ([]byte, error) {
-	if b.routingKey != nil {
-		return b.routingKey, nil
-	}
-
-	if len(b.Entries) == 0 {
+func createRoutingKey(meta *StatementMetadata, values []interface{}) ([]byte, error) {
+	if meta == nil || len(meta.PKBindColumnIndexes) == 0 {
 		return nil, nil
 	}
 
-	entry := b.Entries[0]
-	if entry.binding != nil {
-		// bindings do not have the values let's skip it like Query does.
-		return nil, nil
-	}
-	// try to determine the routing key
-	routingKeyInfo, err := b.session.routingKeyInfo(b.Context(), entry.Stmt)
-	if err != nil {
-		return nil, err
+	if len(values) != len(meta.BindColumns) {
+		return nil, errors.New("gocql: number of values does not match the number of bind columns")
 	}
 
-	return createRoutingKey(routingKeyInfo, entry.Args)
-}
-
-func (b *Batch) GetRoutingKeyYb() ([]byte, error) {
-	if b.routingKey != nil {
-		return b.routingKey, nil
-	}
-
-	if len(b.Entries) == 0 {
-		return nil, nil
-	}
-
-	var result []byte
-	i := 0
-	for i = 0; i < len(b.Entries); i++ {
-		entry := b.Entries[i]
-		if entry.binding != nil {
-			// bindings do not have the values let's skip it like Query does.
-			continue
-		}
-
-		// try to determine the routing key
-		routingKeyInfo, err := b.session.routingKeyInfo(b.Context(), entry.Stmt)
-		if err != nil {
-			continue
-		}
-		if routingKeyInfo == nil {
-			continue
-		}
-		result, err = createRoutingKeyYb(routingKeyInfo, entry.Args)
-		if err != nil {
-			continue
-		} else {
-			break
-		}
-	}
-	if i == len(b.Entries) || result == nil {
-		b.firstBoundStmtIdxYB = -1
-		return nil, nil
-	} else {
-		b.firstBoundStmtIdxYB = i
-		return result, nil
-	}
-}
-
-func createRoutingKey(routingKeyInfo *routingKeyInfo, values []interface{}) ([]byte, error) {
-	if routingKeyInfo == nil {
-		return nil, nil
-	}
-
-	if len(routingKeyInfo.indexes) == 1 {
+	if len(meta.PKBindColumnIndexes) == 1 {
 		// single column routing key
 		routingKey, err := Marshal(
-			routingKeyInfo.types[0],
-			values[routingKeyInfo.indexes[0]],
+			meta.BindColumns[meta.PKBindColumnIndexes[0]].TypeInfo,
+			values[meta.PKBindColumnIndexes[0]],
 		)
 		if err != nil {
 			return nil, err
@@ -2115,67 +2207,82 @@ func createRoutingKey(routingKeyInfo *routingKeyInfo, values []interface{}) ([]b
 
 	// composite routing key
 	buf := bytes.NewBuffer(make([]byte, 0, 256))
-	for i := range routingKeyInfo.indexes {
+	lenBuf := make([]byte, 2)
+	for i := range meta.PKBindColumnIndexes {
 		encoded, err := Marshal(
-			routingKeyInfo.types[i],
-			values[routingKeyInfo.indexes[i]],
+			meta.BindColumns[meta.PKBindColumnIndexes[i]].TypeInfo,
+			values[meta.PKBindColumnIndexes[i]],
 		)
 		if err != nil {
 			return nil, err
 		}
-		lenBuf := []byte{0x00, 0x00}
+		// first write the length of the encoded value as a 16-bit big endian integer
 		binary.BigEndian.PutUint16(lenBuf, uint16(len(encoded)))
 		buf.Write(lenBuf)
+		// then write the encoded value and a null byte to separate the values
 		buf.Write(encoded)
 		buf.WriteByte(0x00)
 	}
-	routingKey := buf.Bytes()
-	return routingKey, nil
+	return buf.Bytes(), nil
 }
 
-func createRoutingKeyYb(routingKeyInfo *routingKeyInfo, values []interface{}) ([]byte, error) {
-	if routingKeyInfo == nil {
+// createRoutingKeyYb builds a YugabyteDB routing key. It differs from
+// createRoutingKey in two ways: values are marshalled with MarshalYb (which
+// uses microsecond timestamps), and a composite key is a plain concatenation
+// of the encoded values rather than Cassandra's length-prefixed form, because
+// that is what YugabyteDB's partition hash is computed over.
+func createRoutingKeyYb(meta *StatementMetadata, values []interface{}) ([]byte, error) {
+	if meta == nil || len(meta.PKBindColumnIndexes) == 0 {
 		return nil, nil
 	}
 
-	if len(routingKeyInfo.indexes) == 1 {
+	if len(values) != len(meta.BindColumns) {
+		return nil, errors.New("gocql: number of values does not match the number of bind columns")
+	}
+
+	if len(meta.PKBindColumnIndexes) == 1 {
 		// single column routing key
-		routingKey, err := MarshalYb(
-			routingKeyInfo.types[0],
-			values[routingKeyInfo.indexes[0]],
+		return MarshalYb(
+			meta.BindColumns[meta.PKBindColumnIndexes[0]].TypeInfo,
+			values[meta.PKBindColumnIndexes[0]],
 		)
-		if err != nil {
-			return nil, err
-		}
-		return routingKey, nil
 	}
 
 	// composite routing key
 	buf := bytes.NewBuffer(make([]byte, 0, 256))
-	for i := range routingKeyInfo.indexes {
+	for i := range meta.PKBindColumnIndexes {
 		encoded, err := MarshalYb(
-			routingKeyInfo.types[i],
-			values[routingKeyInfo.indexes[i]],
+			meta.BindColumns[meta.PKBindColumnIndexes[i]].TypeInfo,
+			values[meta.PKBindColumnIndexes[i]],
 		)
 		if err != nil {
 			return nil, err
 		}
 		buf.Write(encoded)
 	}
-	routingKey := buf.Bytes()
-	return routingKey, nil
+	return buf.Bytes(), nil
 }
 
-func (b *Batch) borrowForExecution() {
-	// empty, because Batch has no equivalent of Query.Release()
-	// that would race with speculative executions.
+// SetKeyspace will enable keyspace flag on the query.
+// It allows to specify the keyspace that the query should be executed in
+//
+// Only available on protocol >= 5.
+func (b *Batch) SetKeyspace(keyspace string) *Batch {
+	b.keyspace = keyspace
+	return b
 }
 
-func (b *Batch) releaseAfterExecution() {
-	// empty, because Batch has no equivalent of Query.Release()
-	// that would race with speculative executions.
+// WithNowInSeconds will enable the with now_in_seconds flag on the query.
+// Also, it allows to define now_in_seconds value.
+//
+// Only available on protocol >= 5.
+func (b *Batch) WithNowInSeconds(now int) *Batch {
+	b.nowInSeconds = &now
+	return b
 }
 
+// BatchType represents the type of batch.
+// Available types: LoggedBatch, UnloggedBatch, CounterBatch.
 type BatchType byte
 
 const (
@@ -2184,6 +2291,8 @@ const (
 	CounterBatch  BatchType = 2
 )
 
+// BatchEntry represents a single statement within a batch operation.
+// It contains the statement, arguments, and execution metadata.
 type BatchEntry struct {
 	Stmt       string
 	Args       []interface{}
@@ -2191,6 +2300,8 @@ type BatchEntry struct {
 	binding    func(q *QueryInfo) ([]interface{}, error)
 }
 
+// ColumnInfo represents metadata about a column in a query result.
+// It contains the keyspace, table, column name, and type information.
 type ColumnInfo struct {
 	Keyspace string
 	Table    string
@@ -2206,17 +2317,6 @@ func (c ColumnInfo) String() string {
 type routingKeyInfoLRU struct {
 	lru *lru.Cache
 	mu  sync.Mutex
-}
-
-type routingKeyInfo struct {
-	indexes  []int
-	types    []TypeInfo
-	keyspace string
-	table    string
-}
-
-func (r *routingKeyInfo) String() string {
-	return fmt.Sprintf("routing key index=%v types=%v", r.indexes, r.types)
 }
 
 func (r *routingKeyInfoLRU) Remove(key string) {
@@ -2308,6 +2408,11 @@ func (t *traceWriter) Trace(traceId []byte) {
 	}
 }
 
+// GetHosts return a list of hosts in the ring the driver knows of.
+func (s *Session) GetHosts() []*HostInfo {
+	return s.ring.allHosts()
+}
+
 type ObservedQuery struct {
 	Keyspace  string
 	Statement string
@@ -2324,7 +2429,7 @@ type ObservedQuery struct {
 	// Rows is not used in batch queries and remains at the default value
 	Rows int
 
-	// Host is the informations about the host that performed the query
+	// Host is the information about the host that performed the query
 	Host *HostInfo
 
 	// The metrics per this host
@@ -2337,6 +2442,9 @@ type ObservedQuery struct {
 	// Attempt is the index of attempt at executing this query.
 	// The first attempt is number zero and any retries have non-zero attempt number.
 	Attempt int
+
+	// Query object associated with this request. Should be used as read only.
+	Query *Query
 }
 
 // QueryObserver is the interface implemented by query observers / stat collectors.
@@ -2374,6 +2482,9 @@ type ObservedBatch struct {
 	// Attempt is the index of attempt at executing this query.
 	// The first attempt is number zero and any retries have non-zero attempt number.
 	Attempt int
+
+	// Batch object associated with this request. Should be used as read only.
+	Batch *Batch
 }
 
 // BatchObserver is the interface implemented by batch observers / stat collectors.
@@ -2403,6 +2514,7 @@ type ConnectObserver interface {
 	ObserveConnect(ObservedConnect)
 }
 
+// Deprecated: Unused
 type Error struct {
 	Code    int
 	Message string
@@ -2425,12 +2537,27 @@ var (
 	ErrNoMetadata           = errors.New("no metadata available")
 )
 
+// ErrProtocol represents a protocol-level error.
 type ErrProtocol struct{ error }
 
+// Unwrap exposes the wrapped error to errors.Is and errors.As.
+//
+// ErrProtocol embeds the error interface, which promotes only Error() string,
+// so without this method the wrapped cause is unreachable. That matters for
+// protocol negotiation: Conn.exec builds NewErrProtocol("%w", &protocolError{...})
+// to signal that a host rejected the protocol version, and
+// startupCoordinator.checkProtocolRelatedError has to unwrap it to see the
+// errorFrame and its ErrCodeProtocol code. Without unwrapping, the check
+// returns false and controlConn.tryProtocolVersionsForHost aborts instead of
+// stepping down to a version the host supports. YugabyteDB supports protocol
+// versions 3 and 4 only, so every connection attempt failed at version 5.
+func (e ErrProtocol) Unwrap() error { return e.error }
+
+// NewErrProtocol creates a new protocol error with the specified format and arguments.
 func NewErrProtocol(format string, args ...interface{}) error {
 	return ErrProtocol{fmt.Errorf(format, args...)}
 }
 
 // BatchSizeMaximum is the maximum number of statements a batch operation can have.
-// This limit is set by cassandra and could change in the future.
+// This limit is set by Cassandra and could change in the future.
 const BatchSizeMaximum = 65535

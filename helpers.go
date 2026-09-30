@@ -1,307 +1,55 @@
-// Copyright (c) 2012 The gocql Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2012, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
 
 package gocql
 
 import (
+	"bytes"
 	"fmt"
-	"math/big"
 	"net"
 	"reflect"
-	"strings"
-	"time"
-
-	"gopkg.in/inf.v0"
 )
 
+// RowData contains the column names and pointers to the default values for each
+// column
 type RowData struct {
 	Columns []string
 	Values  []interface{}
-}
-
-func goType(t TypeInfo) (reflect.Type, error) {
-	switch t.Type() {
-	case TypeVarchar, TypeAscii, TypeInet, TypeText:
-		return reflect.TypeOf(*new(string)), nil
-	case TypeBigInt, TypeCounter:
-		return reflect.TypeOf(*new(int64)), nil
-	case TypeTime:
-		return reflect.TypeOf(*new(time.Duration)), nil
-	case TypeTimestamp:
-		return reflect.TypeOf(*new(time.Time)), nil
-	case TypeBlob:
-		return reflect.TypeOf(*new([]byte)), nil
-	case TypeBoolean:
-		return reflect.TypeOf(*new(bool)), nil
-	case TypeFloat:
-		return reflect.TypeOf(*new(float32)), nil
-	case TypeDouble:
-		return reflect.TypeOf(*new(float64)), nil
-	case TypeInt:
-		return reflect.TypeOf(*new(int)), nil
-	case TypeSmallInt:
-		return reflect.TypeOf(*new(int16)), nil
-	case TypeTinyInt:
-		return reflect.TypeOf(*new(int8)), nil
-	case TypeDecimal:
-		return reflect.TypeOf(*new(*inf.Dec)), nil
-	case TypeUUID, TypeTimeUUID:
-		return reflect.TypeOf(*new(UUID)), nil
-	case TypeList, TypeSet:
-		elemType, err := goType(t.(CollectionType).Elem)
-		if err != nil {
-			return nil, err
-		}
-		return reflect.SliceOf(elemType), nil
-	case TypeMap:
-		keyType, err := goType(t.(CollectionType).Key)
-		if err != nil {
-			return nil, err
-		}
-		valueType, err := goType(t.(CollectionType).Elem)
-		if err != nil {
-			return nil, err
-		}
-		return reflect.MapOf(keyType, valueType), nil
-	case TypeVarint:
-		return reflect.TypeOf(*new(*big.Int)), nil
-	case TypeTuple:
-		// what can we do here? all there is to do is to make a list of interface{}
-		tuple := t.(TupleTypeInfo)
-		return reflect.TypeOf(make([]interface{}, len(tuple.Elems))), nil
-	case TypeUDT:
-		return reflect.TypeOf(make(map[string]interface{})), nil
-	case TypeDate:
-		return reflect.TypeOf(*new(time.Time)), nil
-	case TypeDuration:
-		return reflect.TypeOf(*new(Duration)), nil
-	default:
-		return nil, fmt.Errorf("cannot create Go type for unknown CQL type %s", t)
-	}
 }
 
 func dereference(i interface{}) interface{} {
 	return reflect.Indirect(reflect.ValueOf(i)).Interface()
 }
 
-func getCassandraBaseType(name string) Type {
-	switch name {
-	case "ascii":
-		return TypeAscii
-	case "bigint":
-		return TypeBigInt
-	case "blob":
-		return TypeBlob
-	case "boolean":
-		return TypeBoolean
-	case "counter":
-		return TypeCounter
-	case "date":
-		return TypeDate
-	case "decimal":
-		return TypeDecimal
-	case "double":
-		return TypeDouble
-	case "duration":
-		return TypeDuration
-	case "float":
-		return TypeFloat
-	case "int":
-		return TypeInt
-	case "smallint":
-		return TypeSmallInt
-	case "tinyint":
-		return TypeTinyInt
-	case "time":
-		return TypeTime
-	case "timestamp":
-		return TypeTimestamp
-	case "uuid":
-		return TypeUUID
-	case "varchar":
-		return TypeVarchar
-	case "text":
-		return TypeText
-	case "varint":
-		return TypeVarint
-	case "timeuuid":
-		return TypeTimeUUID
-	case "inet":
-		return TypeInet
-	case "MapType":
-		return TypeMap
-	case "ListType":
-		return TypeList
-	case "SetType":
-		return TypeSet
-	case "TupleType":
-		return TypeTuple
-	default:
-		return TypeCustom
-	}
-}
-
-func getCassandraType(name string, logger StdLogger) TypeInfo {
-	if strings.HasPrefix(name, "frozen<") {
-		return getCassandraType(strings.TrimPrefix(name[:len(name)-1], "frozen<"), logger)
-	} else if strings.HasPrefix(name, "set<") {
-		return CollectionType{
-			NativeType: NativeType{typ: TypeSet},
-			Elem:       getCassandraType(strings.TrimPrefix(name[:len(name)-1], "set<"), logger),
-		}
-	} else if strings.HasPrefix(name, "list<") {
-		return CollectionType{
-			NativeType: NativeType{typ: TypeList},
-			Elem:       getCassandraType(strings.TrimPrefix(name[:len(name)-1], "list<"), logger),
-		}
-	} else if strings.HasPrefix(name, "map<") {
-		names := splitCompositeTypes(strings.TrimPrefix(name[:len(name)-1], "map<"))
-		if len(names) != 2 {
-			logger.Printf("Error parsing map type, it has %d subelements, expecting 2\n", len(names))
-			return NativeType{
-				typ: TypeCustom,
-			}
-		}
-		return CollectionType{
-			NativeType: NativeType{typ: TypeMap},
-			Key:        getCassandraType(names[0], logger),
-			Elem:       getCassandraType(names[1], logger),
-		}
-	} else if strings.HasPrefix(name, "tuple<") {
-		names := splitCompositeTypes(strings.TrimPrefix(name[:len(name)-1], "tuple<"))
-		types := make([]TypeInfo, len(names))
-
-		for i, name := range names {
-			types[i] = getCassandraType(name, logger)
-		}
-
-		return TupleTypeInfo{
-			NativeType: NativeType{typ: TypeTuple},
-			Elems:      types,
-		}
-	} else {
-		return NativeType{
-			typ: getCassandraBaseType(name),
-		}
-	}
-}
-
-func splitCompositeTypes(name string) []string {
-	if !strings.Contains(name, "<") {
-		return strings.Split(name, ", ")
-	}
-	var parts []string
-	lessCount := 0
-	segment := ""
-	for _, char := range name {
-		if char == ',' && lessCount == 0 {
-			if segment != "" {
-				parts = append(parts, strings.TrimSpace(segment))
-			}
-			segment = ""
-			continue
-		}
-		segment += string(char)
-		if char == '<' {
-			lessCount++
-		} else if char == '>' {
-			lessCount--
-		}
-	}
-	if segment != "" {
-		parts = append(parts, strings.TrimSpace(segment))
-	}
-	return parts
-}
-
-func apacheToCassandraType(t string) string {
-	t = strings.Replace(t, apacheCassandraTypePrefix, "", -1)
-	t = strings.Replace(t, "(", "<", -1)
-	t = strings.Replace(t, ")", ">", -1)
-	types := strings.FieldsFunc(t, func(r rune) bool {
-		return r == '<' || r == '>' || r == ','
-	})
-	for _, typ := range types {
-		t = strings.Replace(t, typ, getApacheCassandraType(typ).String(), -1)
-	}
-	// This is done so it exactly matches what Cassandra returns
-	return strings.Replace(t, ",", ", ", -1)
-}
-
-func getApacheCassandraType(class string) Type {
-	switch strings.TrimPrefix(class, apacheCassandraTypePrefix) {
-	case "AsciiType":
-		return TypeAscii
-	case "LongType":
-		return TypeBigInt
-	case "BytesType":
-		return TypeBlob
-	case "BooleanType":
-		return TypeBoolean
-	case "CounterColumnType":
-		return TypeCounter
-	case "DecimalType":
-		return TypeDecimal
-	case "DoubleType":
-		return TypeDouble
-	case "FloatType":
-		return TypeFloat
-	case "Int32Type":
-		return TypeInt
-	case "ShortType":
-		return TypeSmallInt
-	case "ByteType":
-		return TypeTinyInt
-	case "TimeType":
-		return TypeTime
-	case "DateType", "TimestampType":
-		return TypeTimestamp
-	case "UUIDType", "LexicalUUIDType":
-		return TypeUUID
-	case "UTF8Type":
-		return TypeVarchar
-	case "IntegerType":
-		return TypeVarint
-	case "TimeUUIDType":
-		return TypeTimeUUID
-	case "InetAddressType":
-		return TypeInet
-	case "MapType":
-		return TypeMap
-	case "ListType":
-		return TypeList
-	case "SetType":
-		return TypeSet
-	case "TupleType":
-		return TypeTuple
-	case "DurationType":
-		return TypeDuration
-	default:
-		return TypeCustom
-	}
-}
-
-func (r *RowData) rowMap(m map[string]interface{}) {
-	for i, column := range r.Columns {
-		val := dereference(r.Values[i])
-		if valVal := reflect.ValueOf(val); valVal.Kind() == reflect.Slice {
-			valCopy := reflect.MakeSlice(valVal.Type(), valVal.Len(), valVal.Cap())
-			reflect.Copy(valCopy, valVal)
-			m[column] = valCopy.Interface()
-		} else {
-			m[column] = val
-		}
-	}
-}
-
-// TupeColumnName will return the column name of a tuple value in a column named
+// TupleColumnName will return the column name of a tuple value in a column named
 // c at index n. It should be used if a specific element within a tuple is needed
 // to be extracted from a map returned from SliceMap or MapScan.
 func TupleColumnName(c string, n int) string {
 	return fmt.Sprintf("%s[%d]", c, n)
 }
 
+// RowData returns the RowData for the iterator.
 func (iter *Iter) RowData() (RowData, error) {
 	if iter.err != nil {
 		return RowData{}, iter.err
@@ -312,20 +60,14 @@ func (iter *Iter) RowData() (RowData, error) {
 
 	for _, column := range iter.Columns() {
 		if c, ok := column.TypeInfo.(TupleTypeInfo); !ok {
-			val, err := column.TypeInfo.NewWithError()
-			if err != nil {
-				return RowData{}, err
-			}
+			val := reflect.New(reflect.TypeOf(column.TypeInfo.Zero()))
 			columns = append(columns, column.Name)
-			values = append(values, val)
+			values = append(values, val.Interface())
 		} else {
 			for i, elem := range c.Elems {
 				columns = append(columns, TupleColumnName(column.Name, i))
-				val, err := elem.NewWithError()
-				if err != nil {
-					return RowData{}, err
-				}
-				values = append(values, val)
+				val := reflect.New(reflect.TypeOf(elem.Zero()))
+				values = append(values, val.Interface())
 			}
 		}
 	}
@@ -338,32 +80,72 @@ func (iter *Iter) RowData() (RowData, error) {
 	return rowData, nil
 }
 
-// TODO(zariel): is it worth exporting this?
-func (iter *Iter) rowMap() (map[string]interface{}, error) {
-	if iter.err != nil {
-		return nil, iter.err
-	}
-
-	rowData, _ := iter.RowData()
-	iter.Scan(rowData.Values...)
-	m := make(map[string]interface{}, len(rowData.Columns))
-	rowData.rowMap(m)
-	return m, nil
-}
-
-// SliceMap is a helper function to make the API easier to use
-// returns the data from the query in the form of []map[string]interface{}
+// SliceMap is a helper function to make the API easier to use.
+// It returns the data from the query in the form of []map[string]interface{}.
+//
+// Columns are automatically converted to Go types based on their CQL type.
+// The following table shows exactly what Go type to expect when accessing map values:
+//
+//	CQL Type             | Go Type (Non-NULL)   | Go Value for NULL    | Type Assertion Example
+//	ascii                | string               | ""                   | row["col"].(string)
+//	bigint               | int64                | int64(0)             | row["col"].(int64)
+//	blob                 | []byte               | []byte(nil)          | row["col"].([]byte)
+//	boolean              | bool                 | false                | row["col"].(bool)
+//	counter              | int64                | int64(0)             | row["col"].(int64)
+//	date                 | time.Time            | time.Time{}          | row["col"].(time.Time)
+//	decimal              | *inf.Dec             | (*inf.Dec)(nil)      | row["col"].(*inf.Dec)
+//	double               | float64              | float64(0)           | row["col"].(float64)
+//	duration             | gocql.Duration       | gocql.Duration{}     | row["col"].(gocql.Duration)
+//	float                | float32              | float32(0)           | row["col"].(float32)
+//	inet                 | net.IP               | net.IP(nil)          | row["col"].(net.IP)
+//	int                  | int                  | int(0)               | row["col"].(int)
+//	list<T>              | []T                  | []T(nil)             | row["col"].([]string)
+//	map<K,V>             | map[K]V              | map[K]V(nil)         | row["col"].(map[string]int)
+//	set<T>               | []T                  | []T(nil)             | row["col"].([]int)
+//	smallint             | int16                | int16(0)             | row["col"].(int16)
+//	text                 | string               | ""                   | row["col"].(string)
+//	time                 | time.Duration        | time.Duration(0)     | row["col"].(time.Duration)
+//	timestamp            | time.Time            | time.Time{}          | row["col"].(time.Time)
+//	timeuuid             | gocql.UUID           | gocql.UUID{}         | row["col"].(gocql.UUID)
+//	tinyint              | int8                 | int8(0)              | row["col"].(int8)
+//	tuple<T1,T2,...>     | (see below)          | (see below)          | (see below)
+//	uuid                 | gocql.UUID           | gocql.UUID{}         | row["col"].(gocql.UUID)
+//	varchar              | string               | ""                   | row["col"].(string)
+//	varint               | *big.Int             | (*big.Int)(nil)      | row["col"].(*big.Int)
+//	vector<T,N>          | []T                  | []T(nil)             | row["col"].([]float32)
+//
+// Special Cases:
+//
+// Tuple Types: Tuple elements are split into separate map entries with keys like "column[0]", "column[1]", etc.
+// Use TupleColumnName to generate the correct key:
+//
+//	// For tuple<int, text> column named "my_tuple"
+//	elem0 := row[gocql.TupleColumnName("my_tuple", 0)].(int)
+//	elem1 := row[gocql.TupleColumnName("my_tuple", 1)].(string)
+//
+// User-Defined Types (UDTs): Returned as map[string]interface{} with field names as keys:
+//
+//	udt := row["my_udt"].(map[string]interface{})
+//	name := udt["name"].(string)
+//	age := udt["age"].(int)
+//
+// Important Notes:
+//   - Always use type assertions when accessing map values: row["col"].(ExpectedType)
+//   - NULL database values return Go zero values or nil for pointer types
+//   - Collection types (list, set, map, vector) return nil slices/maps for NULL values
+//   - Migration from v1.x: inet columns now return net.IP instead of string values
 func (iter *Iter) SliceMap() ([]map[string]interface{}, error) {
 	if iter.err != nil {
 		return nil, iter.err
 	}
 
-	// Not checking for the error because we just did
-	rowData, _ := iter.RowData()
-	dataToReturn := make([]map[string]interface{}, 0)
-	for iter.Scan(rowData.Values...) {
-		m := make(map[string]interface{}, len(rowData.Columns))
-		rowData.rowMap(m)
+	numCols := len(iter.Columns())
+	var dataToReturn []map[string]interface{}
+	for {
+		m := make(map[string]interface{}, numCols)
+		if !iter.MapScan(m) {
+			break
+		}
 		dataToReturn = append(dataToReturn, m)
 	}
 	if iter.err != nil {
@@ -373,11 +155,16 @@ func (iter *Iter) SliceMap() ([]map[string]interface{}, error) {
 }
 
 // MapScan takes a map[string]interface{} and populates it with a row
-// that is returned from cassandra.
+// that is returned from Cassandra.
 //
 // Each call to MapScan() must be called with a new map object.
 // During the call to MapScan() any pointers in the existing map
-// are replaced with non pointer types before the call returns
+// are replaced with non pointer types before the call returns.
+//
+// Columns are automatically converted to Go types based on their CQL type.
+// See SliceMap for the complete CQL to Go type mapping table and examples.
+//
+// Usage Examples:
 //
 //	iter := session.Query(`SELECT * FROM mytable`).Iter()
 //	for {
@@ -392,7 +179,7 @@ func (iter *Iter) SliceMap() ([]map[string]interface{}, error) {
 //		}
 //	}
 //
-// You can also pass pointers in the map before each call
+// You can also pass pointers in the map before each call:
 //
 //	var fullName FullName // Implements gocql.Unmarshaler and gocql.Marshaler interfaces
 //	var address net.IP
@@ -415,17 +202,43 @@ func (iter *Iter) MapScan(m map[string]interface{}) bool {
 		return false
 	}
 
-	// Not checking for the error because we just did
-	rowData, _ := iter.RowData()
-
-	for i, col := range rowData.Columns {
-		if dest, ok := m[col]; ok {
-			rowData.Values[i] = dest
+	cols := iter.Columns()
+	columnNames := make([]string, 0, len(cols))
+	values := make([]interface{}, 0, len(cols))
+	for _, column := range iter.Columns() {
+		if c, ok := column.TypeInfo.(TupleTypeInfo); ok {
+			for i := range c.Elems {
+				columnName := TupleColumnName(column.Name, i)
+				if dest, ok := m[columnName]; ok {
+					values = append(values, dest)
+				} else {
+					zero := c.Elems[i].Zero()
+					// technically this is a *interface{} but later we will fix it
+					values = append(values, &zero)
+				}
+				columnNames = append(columnNames, columnName)
+			}
+		} else {
+			if dest, ok := m[column.Name]; ok {
+				values = append(values, dest)
+			} else {
+				zero := column.TypeInfo.Zero()
+				// technically this is a *interface{} but later we will fix it
+				values = append(values, &zero)
+			}
+			columnNames = append(columnNames, column.Name)
 		}
 	}
-
-	if iter.Scan(rowData.Values...) {
-		rowData.rowMap(m)
+	if iter.Scan(values...) {
+		for i, name := range columnNames {
+			if iptr, ok := values[i].(*interface{}); ok {
+				m[name] = *iptr
+			} else {
+				// TODO: it seems wrong to dereference the values that were passed in
+				// originally in the map but that's what it was doing before
+				m[name] = dereference(values[i])
+			}
+		}
 		return true
 	}
 	return false
@@ -445,4 +258,51 @@ func LookupIP(host string) ([]net.IP, error) {
 	}
 	return net.LookupIP(host)
 
+}
+
+func ringString(hosts []*HostInfo) string {
+	buf := new(bytes.Buffer)
+	for _, h := range hosts {
+		buf.WriteString("[" + h.ConnectAddress().String() + "-" + h.HostID() + ":" + h.State().String() + "]")
+	}
+	return buf.String()
+}
+
+// stringsSlicesEqual compares two slices of strings. It doesn't ignore case and order.
+// It returns false if:
+// - slices are not the same length
+// - one slice is nil and the other is not
+// - corresponding elements are not equal
+func stringsSlicesEqual(a, b []string) bool {
+	if a == nil && b == nil {
+		return true
+	}
+
+	if a == nil || b == nil {
+		return false
+	}
+
+	if len(a) != len(b) {
+		return false
+	}
+
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// compareMapStringInterface compares two maps map[string]interface{} for equality.
+func compareMapStringInterface(mapA, mapB map[string]interface{}) bool {
+	if len(mapA) != len(mapB) {
+		return false
+	}
+	for k, v := range mapA {
+		if v != mapB[k] {
+			return false
+		}
+	}
+	return true
 }

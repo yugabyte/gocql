@@ -1,3 +1,6 @@
+//go:build all || unit
+// +build all unit
+
 package gocql
 
 import (
@@ -7,7 +10,7 @@ import (
 	"time"
 )
 
-//Test of Transactions supported by YCQL
+// Test of Transactions supported by YCQL
 func Test_YB_Trsansaction(t *testing.T) {
 	//change the ip address according to the cluster
 	cluster := NewCluster("127.0.0.1")

@@ -1,52 +1,53 @@
 //go:build all || cassandra
 // +build all cassandra
 
+/*
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+/*
+ * Content before git sha 34fdeebefcbf183ed7f916f931aa0586fdaa1b40
+ * Copyright (c) 2016, The Gocql authors,
+ * provided under the BSD-3-Clause License.
+ * See the NOTICE file distributed with this work for additional information.
+ */
+
 package gocql
 
 import (
 	"context"
 	"fmt"
-	"net"
 	"testing"
 )
 
 func TestSessionAPI(t *testing.T) {
-	cfg := &ClusterConfig{}
+	cfg := NewCluster()
 
 	s := &Session{
 		cfg:    *cfg,
 		cons:   Quorum,
 		policy: RoundRobinHostPolicy(),
-		logger: cfg.logger(),
+		logger: cfg.newLogger(),
 	}
+	defer s.Close()
 
 	s.pool = cfg.PoolConfig.buildPool(s)
 	s.executor = &queryExecutor{
 		pool:   s.pool,
 		policy: s.policy,
-	}
-	defer s.Close()
-
-	s.SetConsistency(All)
-	if s.cons != All {
-		t.Fatalf("expected consistency 'All', got '%v'", s.cons)
-	}
-
-	s.SetPageSize(100)
-	if s.pageSize != 100 {
-		t.Fatalf("expected pageSize 100, got %v", s.pageSize)
-	}
-
-	s.SetPrefetch(0.75)
-	if s.prefetch != 0.75 {
-		t.Fatalf("expceted prefetch 0.75, got %v", s.prefetch)
-	}
-
-	trace := &traceWriter{}
-
-	s.SetTrace(trace)
-	if s.trace != trace {
-		t.Fatalf("expected traceWriter '%v',got '%v'", trace, s.trace)
 	}
 
 	qry := s.Query("test", 1)
@@ -67,17 +68,17 @@ func TestSessionAPI(t *testing.T) {
 		t.Fatalf("expected qry.stmt to be 'test', got '%v'", boundQry.stmt)
 	}
 
-	itr := s.executeQuery(qry)
+	itr := s.executeQuery(newInternalQuery(qry, nil))
 	if itr.err != ErrNoConnections {
 		t.Fatalf("expected itr.err to be '%v', got '%v'", ErrNoConnections, itr.err)
 	}
 
-	testBatch := s.NewBatch(LoggedBatch)
+	testBatch := s.Batch(LoggedBatch)
 	testBatch.Query("test")
-	err := s.ExecuteBatch(testBatch)
+	err := testBatch.Exec()
 
 	if err != ErrNoConnections {
-		t.Fatalf("expected session.ExecuteBatch to return '%v', got '%v'", ErrNoConnections, err)
+		t.Fatalf("expected batch.Exec to return '%v', got '%v'", ErrNoConnections, err)
 	}
 
 	s.Close()
@@ -87,9 +88,9 @@ func TestSessionAPI(t *testing.T) {
 	//Should just return cleanly
 	s.Close()
 
-	err = s.ExecuteBatch(testBatch)
+	err = testBatch.Exec()
 	if err != ErrSessionClosed {
-		t.Fatalf("expected session.ExecuteBatch to return '%v', got '%v'", ErrSessionClosed, err)
+		t.Fatalf("expected batch.Exec to return '%v', got '%v'", ErrSessionClosed, err)
 	}
 }
 
@@ -100,32 +101,20 @@ func (f funcQueryObserver) ObserveQuery(ctx context.Context, o ObservedQuery) {
 }
 
 func TestQueryBasicAPI(t *testing.T) {
-	qry := &Query{routingInfo: &queryRoutingInfo{}}
-
-	// Initiate host
-	ip := "127.0.0.1"
-
-	qry.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 0, TotalLatency: 0}})
-	if qry.Latency() != 0 {
-		t.Fatalf("expected Query.Latency() to return 0, got %v", qry.Latency())
-	}
-
-	qry.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 2, TotalLatency: 4}})
-	if qry.Attempts() != 2 {
-		t.Fatalf("expected Query.Attempts() to return 2, got %v", qry.Attempts())
-	}
-	if qry.Latency() != 2 {
-		t.Fatalf("expected Query.Latency() to return 2, got %v", qry.Latency())
-	}
-
-	qry.AddAttempts(2, &HostInfo{hostname: ip, connectAddress: net.ParseIP(ip), port: 9042})
-	if qry.Attempts() != 4 {
-		t.Fatalf("expected Query.Attempts() to return 4, got %v", qry.Attempts())
-	}
+	qry := &Query{}
 
 	qry.Consistency(All)
 	if qry.GetConsistency() != All {
 		t.Fatalf("expected Query.GetConsistency to return 'All', got '%s'", qry.GetConsistency())
+	}
+
+	if sc, ok := qry.GetSerialConsistency(); ok {
+		t.Fatalf("expected Query.GetSerialConsistency to return false when not set, got '%s'", sc)
+	}
+
+	qry.SerialConsistency(Serial)
+	if sc, ok := qry.GetSerialConsistency(); !ok || sc != Serial {
+		t.Fatalf("expected Query.GetSerialConsistency to return 'Serial', got '%v' (ok=%v)", sc, ok)
 	}
 
 	trace := &traceWriter{}
@@ -164,7 +153,7 @@ func TestQueryBasicAPI(t *testing.T) {
 func TestQueryShouldPrepare(t *testing.T) {
 	toPrepare := []string{"select * ", "INSERT INTO", "update table", "delete from", "begin batch"}
 	cantPrepare := []string{"create table", "USE table", "LIST keyspaces", "alter table", "drop table", "grant user", "revoke user"}
-	q := &Query{routingInfo: &queryRoutingInfo{}}
+	q := &Query{}
 
 	for i := 0; i < len(toPrepare); i++ {
 		q.stmt = toPrepare[i]
@@ -188,14 +177,14 @@ func TestBatchBasicAPI(t *testing.T) {
 	s := &Session{
 		cfg:    *cfg,
 		cons:   Quorum,
-		logger: cfg.logger(),
+		logger: cfg.newLogger(),
 	}
 	defer s.Close()
 
 	s.pool = cfg.PoolConfig.buildPool(s)
 
 	// Test UnloggedBatch
-	b := s.NewBatch(UnloggedBatch)
+	b := s.Batch(UnloggedBatch)
 	if b.Type != UnloggedBatch {
 		t.Fatalf("expceted batch.Type to be '%v', got '%v'", UnloggedBatch, b.Type)
 	} else if b.rt != cfg.RetryPolicy {
@@ -203,38 +192,25 @@ func TestBatchBasicAPI(t *testing.T) {
 	}
 
 	// Test LoggedBatch
-	b = s.NewBatch(LoggedBatch)
+	b = s.Batch(LoggedBatch)
 	if b.Type != LoggedBatch {
 		t.Fatalf("expected batch.Type to be '%v', got '%v'", LoggedBatch, b.Type)
-	}
-
-	ip := "127.0.0.1"
-
-	// Test attempts
-	b.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 1}})
-	if b.Attempts() != 1 {
-		t.Fatalf("expected batch.Attempts() to return %v, got %v", 1, b.Attempts())
-	}
-
-	b.AddAttempts(2, &HostInfo{hostname: ip, connectAddress: net.ParseIP(ip), port: 9042})
-	if b.Attempts() != 3 {
-		t.Fatalf("expected batch.Attempts() to return %v, got %v", 3, b.Attempts())
-	}
-
-	// Test latency
-	if b.Latency() != 0 {
-		t.Fatalf("expected batch.Latency() to be 0, got %v", b.Latency())
-	}
-
-	b.metrics = preFilledQueryMetrics(map[string]*hostMetrics{ip: {Attempts: 1, TotalLatency: 4}})
-	if b.Latency() != 4 {
-		t.Fatalf("expected batch.Latency() to return %v, got %v", 4, b.Latency())
 	}
 
 	// Test Consistency
 	b.Cons = One
 	if b.GetConsistency() != One {
 		t.Fatalf("expected batch.GetConsistency() to return 'One', got '%s'", b.GetConsistency())
+	}
+
+	// Test Serial Consistency
+	if sc, ok := b.GetSerialConsistency(); ok {
+		t.Fatalf("expected batch.GetSerialConsistency() to return false when not set, got '%s'", sc)
+	}
+
+	b.SerialConsistency(Serial)
+	if sc, ok := b.GetSerialConsistency(); !ok || sc != Serial {
+		t.Fatalf("expected batch.GetSerialConsistency() to return 'Serial', got '%v' (ok=%v)", sc, ok)
 	}
 
 	trace := &traceWriter{}
@@ -273,6 +249,43 @@ func TestBatchBasicAPI(t *testing.T) {
 		t.Fatalf("expected batch.Size() to return 2, got %v", b.Size())
 	}
 
+}
+
+func TestQueryIterBasicApi(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	qry := session.Query("INSERT INTO gocql_test.invalid_table(value) VALUES(1)")
+	iter1 := qry.Iter()
+	if iter1.Attempts() != 1 {
+		t.Fatalf("expected iter1 Iter.Attempts() to return 1, got %v", iter1.Attempts())
+	}
+	iter2 := qry.Iter()
+	if iter2.Attempts() != 1 {
+		t.Fatalf("expected iter2 Iter.Attempts() to return 1, got %v", iter2.Attempts())
+	}
+	if iter1.Attempts() != 1 {
+		t.Fatalf("expected iter1 Iter.Attempts() to still return 1, got %v", iter1.Attempts())
+	}
+}
+
+func TestBatchIterBasicApi(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	b := session.Batch(LoggedBatch)
+	b.Query("INSERT INTO gocql_test.invalid_table(value) VALUES(1)")
+	iter1 := b.Iter()
+	if iter1.Attempts() != 1 {
+		t.Fatalf("expected iter1 Iter.Attempts() to return 1, got %v", iter1.Attempts())
+	}
+	iter2 := b.Iter()
+	if iter2.Attempts() != 1 {
+		t.Fatalf("expected iter2 Iter.Attempts() to return 1, got %v", iter2.Attempts())
+	}
+	if iter1.Attempts() != 1 {
+		t.Fatalf("expected iter1 Iter.Attempts() to still return 1, got %v", iter1.Attempts())
+	}
 }
 
 func TestConsistencyNames(t *testing.T) {
@@ -321,5 +334,72 @@ func TestIsUseStatement(t *testing.T) {
 		if v != tc.exp {
 			t.Fatalf("expected %v but got %v for statement %q", tc.exp, v, tc.input)
 		}
+	}
+}
+
+type simpleTestRetryPolycy struct {
+	RetryType  RetryType
+	NumRetries int
+}
+
+func (p *simpleTestRetryPolycy) Attempt(q RetryableQuery) bool {
+	return q.Attempts() <= p.NumRetries
+}
+
+func (p *simpleTestRetryPolycy) GetRetryType(error) RetryType {
+	return p.RetryType
+}
+
+// TestRetryType_IgnoreRethrow verify that with Ignore/Rethrow retry types:
+// - retries stopped
+// - return error is nil on Ignore
+// - return error is not nil on Rethrow
+// - observed error is not nil
+func TestRetryType_IgnoreRethrow(t *testing.T) {
+	session := createSession(t)
+	defer session.Close()
+
+	var observedErr error
+	var observedAttempts int
+
+	resetObserved := func() {
+		observedErr = nil
+		observedAttempts = 0
+	}
+
+	observer := funcQueryObserver(func(ctx context.Context, o ObservedQuery) {
+		observedErr = o.Err
+		observedAttempts++
+	})
+
+	for _, caseParams := range []struct {
+		retries   int
+		retryType RetryType
+	}{
+		{0, Ignore},  // check that error ignored even on last attempt
+		{1, Ignore},  // check thet ignore stops retries
+		{1, Rethrow}, // check thet rethrow stops retries
+	} {
+		retryPolicy := &simpleTestRetryPolycy{RetryType: caseParams.retryType, NumRetries: caseParams.retries}
+
+		err := session.Query("INSERT INTO gocql_test.invalid_table(value) VALUES(1)").Idempotent(true).RetryPolicy(retryPolicy).Observer(observer).Exec()
+
+		if err != nil && caseParams.retryType == Ignore {
+			t.Fatalf("[%v] Expected no error, got: %s", caseParams.retryType, err)
+		}
+
+		if err == nil && caseParams.retryType == Rethrow {
+			t.Fatalf("[%v] Expected unconfigured table error, got: nil", caseParams.retryType)
+		}
+
+		if observedErr == nil {
+			t.Fatal("Expected unconfigured table error in Obserer, got: nil")
+		}
+
+		if observedAttempts > 1 {
+			t.Fatalf("Expected one attempt, got: %d", observedAttempts)
+		}
+
+		resetObserved()
 	}
 }
