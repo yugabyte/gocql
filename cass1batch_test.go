@@ -33,6 +33,7 @@ import (
 )
 
 func TestProto1BatchInsert(t *testing.T) {
+	skipUnsupportedByYCQL(t, "BEGIN BATCH; YCQL expects BEGIN TRANSACTION")
 	session := createSession(t)
 	defer session.Close()
 

@@ -150,6 +150,7 @@ func (s *schemaChangesTestListener) clear() {
 }
 
 func TestSchemaEvents(t *testing.T) {
+	skipUnsupportedByYCQL(t, "CQL SCHEMA_CHANGE events; creating a keyspace emits only topology_change frames, so schema listeners never fire")
 	listener := &schemaChangesTestListener{}
 
 	session := createSession(t, func(config *ClusterConfig) {

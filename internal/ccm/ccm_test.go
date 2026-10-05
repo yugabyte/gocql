@@ -32,6 +32,10 @@ import (
 )
 
 func TestCCM(t *testing.T) {
+	// gocql-yb: CCM (Cassandra Cluster Manager) provisions and controls Apache
+	// Cassandra clusters. This fork targets YugabyteDB, which CCM cannot manage,
+	// so the ccm-tagged tests cannot run meaningfully here.
+	t.Skip("gocql-yb: requires CCM, which manages Apache Cassandra, not YugabyteDB")
 	if err := AllUp(); err != nil {
 		t.Fatal(err)
 	}

@@ -323,3 +323,12 @@ func assertNil(t *testing.T, description string, actual interface{}) {
 		t.Fatalf("expected %s to be (nil) but was (%#v) instead", description, actual)
 	}
 }
+
+// skipUnsupportedByYCQL marks a test as skipped because YugabyteDB's CQL
+// implementation does not provide the behaviour the test exercises. These are
+// upstream Apache Cassandra tests; the feature gap is in the server, not the
+// driver.
+func skipUnsupportedByYCQL(t *testing.T, what string) {
+	t.Helper()
+	t.Skipf("gocql-yb: YCQL does not support %s", what)
+}

@@ -124,6 +124,7 @@ func TestInvalidKeyspace(t *testing.T) {
 }
 
 func TestTracing(t *testing.T) {
+	skipUnsupportedByYCQL(t, "CQL query tracing")
 	session := createSession(t)
 	defer session.Close()
 
@@ -384,6 +385,11 @@ func TestPagingWithBind(t *testing.T) {
 }
 
 func TestCAS(t *testing.T) {
+	// YCQL rejects batch conditional DML outright: "batch execution of conditional
+	// DML statement without RETURNS STATUS AS ROW clause is not supported yet".
+	// It also returns only primary-key columns from a failed INSERT IF NOT EXISTS,
+	// where Cassandra returns every column.
+	skipUnsupportedByYCQL(t, "batch conditional DML")
 	cluster := createCluster()
 	cluster.SerialConsistency = LocalSerial
 	session := createSessionFromCluster(cluster, t)
@@ -693,6 +699,7 @@ func TestDurationType(t *testing.T) {
 }
 
 func TestMapScanCAS(t *testing.T) {
+	skipUnsupportedByYCQL(t, "batch conditional DML, and returns only primary-key columns from a failed INSERT IF NOT EXISTS")
 	session := createSession(t)
 	defer session.Close()
 
@@ -978,7 +985,7 @@ func TestMapScanWithRefMap(t *testing.T) {
 	if err := createTable(session, `CREATE TABLE gocql_test.scan_map_ref_table (
 			testtext       text PRIMARY KEY,
 			testfullname   text,
-			testint        int,
+			testint        int
 		)`); err != nil {
 		t.Fatal("create table:", err)
 	}
@@ -1045,7 +1052,7 @@ func TestMapScan(t *testing.T) {
 			fullname       text PRIMARY KEY,
 			age            int,
 			address        inet,
-			data           blob,
+			data           blob
 		)`); err != nil {
 		t.Fatal("create table:", err)
 	}
@@ -1317,7 +1324,7 @@ func TestSmallInt(t *testing.T) {
 	}
 
 	if err := createTable(session, `CREATE TABLE gocql_test.smallint_table (
-			testsmallint  smallint PRIMARY KEY,
+			testsmallint  smallint PRIMARY KEY
 		)`); err != nil {
 		t.Fatal("create table:", err)
 	}
@@ -2370,7 +2377,9 @@ func TestGetColumnMetadata(t *testing.T) {
 	session := createSession(t)
 	defer session.Close()
 
-	if err := createTable(session, "CREATE TABLE gocql_test.test_column_metadata (first_id int, second_id int, third_id int, PRIMARY KEY (first_id, second_id))"); err != nil {
+	// gocql-yb: YCQL requires transactions enabled on the table before a
+	// secondary index can be created on it.
+	if err := createTable(session, "CREATE TABLE gocql_test.test_column_metadata (first_id int, second_id int, third_id int, PRIMARY KEY (first_id, second_id)) WITH transactions = {'enabled': true}"); err != nil {
 		t.Fatalf("failed to create table with error '%v'", err)
 	}
 
@@ -2577,6 +2586,7 @@ func assertMaterializedViewMetadata(t *testing.T, materializedViews []Materializ
 }
 
 func TestAggregateMetadata(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined aggregates")
 	session := createSession(t)
 	defer session.Close()
 	createAggregate(t, session)
@@ -2637,6 +2647,7 @@ func assertAggregateMetadata(t *testing.T, aggregates []AggregateMetadata, err e
 }
 
 func TestFunctionMetadata(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined functions")
 	session := createSession(t)
 	defer session.Close()
 	createFunctions(t, session)
@@ -2723,6 +2734,7 @@ func assertFunctionMetadata(t *testing.T, functions []FunctionMetadata, err erro
 
 // Integration test of querying keyspace metadata with different MetadataCacheMode settings
 func TestKeyspaceMetadata(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined functions, which this test creates")
 	testCases := []struct {
 		name      string
 		cacheMode MetadataCacheMode
@@ -2958,7 +2970,13 @@ func TestKeyspaceMetadata(t *testing.T) {
 
 // Integration test of the routing key calculation
 func TestRoutingStatementMetadata(t *testing.T) {
-	session := createSession(t)
+	// gocql-yb: this test asserts on routingMetadataCache size. The YugabyteDB
+	// default policy resolves routing metadata inside Pick, so every query run by
+	// the test would populate the cache too. Pin the upstream policy so the cache
+	// reflects only this test's explicit lookups.
+	session := createSession(t, func(config *ClusterConfig) {
+		config.PoolConfig.HostSelectionPolicy = RoundRobinHostPolicy()
+	})
 	defer session.Close()
 
 	if err := createTable(session, "CREATE TABLE gocql_test.test_single_routing_key (first_id int, second_id varchar, PRIMARY KEY (first_id, second_id))"); err != nil {
@@ -3356,6 +3374,7 @@ func TestManualQueryPaging(t *testing.T) {
 }
 
 func TestLexicalUUIDType(t *testing.T) {
+	skipUnsupportedByYCQL(t, "the Cassandra-only LexicalUUIDType")
 	session := createSession(t)
 	defer session.Close()
 

@@ -53,6 +53,7 @@ func TestBatch_Errors(t *testing.T) {
 }
 
 func TestBatch_WithTimestamp(t *testing.T) {
+	skipUnsupportedByYCQL(t, "batch-level USING TIMESTAMP; the server assigns its own write time")
 	session := createSession(t)
 	defer session.Close()
 

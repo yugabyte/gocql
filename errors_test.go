@@ -32,6 +32,7 @@ import (
 )
 
 func TestErrorsParse(t *testing.T) {
+	skipUnsupportedByYCQL(t, "the AlreadyExists error code (0x2400); a duplicate object returns Invalid (0x2200), so the driver yields RequestErrInvalid")
 	session := createSession(t)
 	defer session.Close()
 

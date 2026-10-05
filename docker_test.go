@@ -40,6 +40,7 @@ import (
 // This test tests that gocql is able to connect to a C* node provisioned with Docker
 // This is useful to make sure we don't break common testing configurations
 func TestDocker(t *testing.T) {
+	t.Skip("gocql-yb: runs against an Apache Cassandra container, not YugabyteDB")
 	version := "3.11.11"
 	randomUuid := MustRandomUUID().String()
 	err := exec.Command("docker", "run", "-d", "--name", randomUuid, "-p", "9080:9042", fmt.Sprintf("cassandra:%s", version)).Run()

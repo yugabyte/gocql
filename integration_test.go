@@ -157,6 +157,7 @@ func TestHostFilterInitial(t *testing.T) {
 }
 
 func TestWriteFailure(t *testing.T) {
+	skipUnsupportedByYCQL(t, "the cassandra.test.fail_writes_ks JVM option this test needs")
 	cluster := createCluster()
 	createKeyspace(t, cluster, "test")
 	cluster.Keyspace = "test"
@@ -196,6 +197,7 @@ func TestWriteFailure(t *testing.T) {
 }
 
 func TestCustomPayloadMessages(t *testing.T) {
+	skipUnsupportedByYCQL(t, "custom payloads (needs CustomPayloadMirroringQueryHandler)")
 	cluster := createCluster()
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
@@ -233,6 +235,7 @@ func TestCustomPayloadMessages(t *testing.T) {
 }
 
 func TestCustomPayloadValues(t *testing.T) {
+	skipUnsupportedByYCQL(t, "custom payloads (needs CustomPayloadMirroringQueryHandler)")
 	cluster := createCluster()
 	session := createSessionFromCluster(cluster, t)
 	defer session.Close()
@@ -263,6 +266,7 @@ func TestSessionAwaitSchemaAgreement(t *testing.T) {
 }
 
 func TestUDF(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined functions")
 	session := createSession(t)
 	defer session.Close()
 	if session.cfg.ProtoVersion < 4 {
@@ -365,6 +369,7 @@ func compareValues(t *testing.T, cqlType string, expected, actual interface{}) b
 
 // TestSliceMapMapScanTypes tests SliceMap and MapScan with various CQL types
 func TestSliceMapMapScanTypes(t *testing.T) {
+	skipUnsupportedByYCQL(t, "user-defined types")
 	session := createSession(t)
 	defer session.Close()
 
@@ -619,6 +624,7 @@ func TestSliceMapMapScanCounterTypes(t *testing.T) {
 // TestSliceMapMapScanTupleTypes tests tuple types separately since they have special handling
 // (tuple elements get split into individual columns)
 func TestSliceMapMapScanTupleTypes(t *testing.T) {
+	skipUnsupportedByYCQL(t, "tuple types")
 	session := createSession(t)
 	defer session.Close()
 
